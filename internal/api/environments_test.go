@@ -487,6 +487,187 @@ func TestUpdatePolicyAdmissionRuntimeEnvKnobs(t *testing.T) {
 func boolPtr(b bool) *bool { return &b }
 func i64(v int64) *int64   { return &v }
 
+// --- CVE/scan gate (#58) ---
+
+// scannedEnvironment is a published catalog entry carrying the given scan
+// verdict (nil = never scanned), so the gate tests read as a table over the
+// verdict.
+func scannedEnvironment(name string, scan *core.EnvironmentScan) core.Environment {
+	when := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	return core.Environment{
+		Name:        name,
+		BaseImage:   "rayproject/ray:2.9.0",
+		Packages:    []string{"numpy==1.26.4"},
+		Status:      core.EnvironmentStatusPublished,
+		PublishedBy: strPtr("root"),
+		PublishedAt: &when,
+		Scan:        scan,
+	}
+}
+
+// The require_scanned_environments admission knob (#58): with the rule off
+// an unscanned published environment resolves fine (the default, so the
+// feature is opt-in); with the rule on, an absent, pending or failed
+// verdict refuses the reference with a 400 whose audit reason distinguishes
+// never-vetted (environment_unscanned) from recorded-failure
+// (environment_scan_failed), and only a clean verdict is admitted.
+func TestScanGateRefusesUncleanEnvironments(t *testing.T) {
+	clean := &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0")}
+	pending := &core.EnvironmentScan{Status: core.EnvironmentScanPending}
+	failed := &core.EnvironmentScan{Status: core.EnvironmentScanFailed, Scanner: strPtr("trivy 0.57.0")}
+
+	// Rule off (no admission section at all): every published environment
+	// is referenceable, scanned or not.
+	off := &Server{Store: newMemStore(t), PolicySeed: PolicyConfig{Environments: []core.Environment{
+		scannedEnvironment("bare", nil),
+	}}}
+	op := ctxWithIdentity(testIdentity("op", auth.RoleOperator))
+	if _, err := off.resolveEnvironment(context.Background(), "team-a", "bare", new(string)); err != nil {
+		t.Errorf("rule off, unscanned environment: %v, want admitted", err)
+	}
+
+	// Rule on for "*": absent and pending are environment_unscanned,
+	// failed is environment_scan_failed, clean is admitted.
+	store := newMemStore(t)
+	gated := &Server{Store: store, PolicySeed: PolicyConfig{
+		Environments: []core.Environment{
+			scannedEnvironment("bare", nil),
+			scannedEnvironment("pending", pending),
+			scannedEnvironment("failed", failed),
+			scannedEnvironment("clean", clean),
+		},
+		Admission: map[string]core.AdmissionRule{"*": {RequireScannedEnvironments: true}},
+	}}
+	for name, want := range map[string]string{
+		"bare":    "environment_unscanned",
+		"pending": "environment_unscanned",
+		"failed":  "environment_scan_failed",
+	} {
+		_, err := gated.resolveEnvironment(op, "team-a", name, new(string))
+		if err == nil {
+			t.Errorf("%s: admitted, want a 400", name)
+			continue
+		}
+		mustHTTPError(t, err, 400)
+		if got := environmentAuditReason(err); got != want {
+			t.Errorf("%s: audit reason = %q, want %q", name, got, want)
+		}
+	}
+	if _, err := gated.resolveEnvironment(op, "team-a", "clean", new(string)); err != nil {
+		t.Errorf("clean verdict refused: %v, want admitted", err)
+	}
+
+	// The refusal audits under its own reason through the create path.
+	body := CreateCluster{Id: "c1", Spec: ClusterSpec{
+		Name: "c1", Project: "team-a", Image: "rayproject/ray:2.9.0", HeadCpu: "1", HeadMemory: "2Gi",
+		WorkerGroups: []WorkerGroup{}, Environment: strPtr("failed"),
+	}}
+	mustHTTPError(t, mustErr(gated.CreateCluster(op, CreateClusterRequestObject{Body: &body})), http.StatusBadRequest)
+	if c, _ := store.Get(context.Background(), "c1"); c != nil {
+		t.Error("a scan-gate-refused create must persist nothing")
+	}
+	rows, _, aerr := store.ListAudit(context.Background(), core.AuditFilter{})
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	denied := false
+	for _, row := range rows {
+		if row.Event.Decision == core.AuditDecisionDeny && row.Event.Reason != nil && *row.Event.Reason == "environment_scan_failed" {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Error("expected a create_cluster audit deny with reason environment_scan_failed")
+	}
+
+	// A "*" gate is a platform rule: a project's own rule cannot un-set it
+	// (a boolean toggle carries no set/unset distinction — admissionFor's
+	// inheritance, same as the runtime-env permit toggles).
+	starPlusProject := &Server{Store: newMemStore(t), PolicySeed: PolicyConfig{
+		Environments: []core.Environment{scannedEnvironment("bare", nil)},
+		Admission: map[string]core.AdmissionRule{
+			"*":      {RequireScannedEnvironments: true},
+			"team-a": {RequireScannedEnvironments: false},
+		},
+	}}
+	if _, err := starPlusProject.resolveEnvironment(op, "team-a", "bare", new(string)); err == nil {
+		t.Error("project rule un-set the '*' gate: admitted, want refused")
+	}
+
+	// Per-project scope: a rule naming team-b gates team-b's references
+	// only; team-a's identical reference resolves.
+	perProject := &Server{Store: newMemStore(t), PolicySeed: PolicyConfig{
+		Environments: []core.Environment{scannedEnvironment("bare", nil)},
+		Admission:    map[string]core.AdmissionRule{"team-b": {RequireScannedEnvironments: true}},
+	}}
+	if _, err := perProject.resolveEnvironment(op, "team-a", "bare", new(string)); err != nil {
+		t.Errorf("ungated project's reference: %v, want admitted", err)
+	}
+	if _, err := perProject.resolveEnvironment(op, "team-b", "bare", new(string)); err == nil {
+		t.Error("gated project's reference admitted, want refused")
+	}
+}
+
+// The scan gate knob rides the admission section like the runtime-env knobs:
+// it round-trips through PUT/GET.
+func TestUpdatePolicyAdmissionScanGateKnob(t *testing.T) {
+	s := &Server{Store: newMemStore(t)}
+	ctx := ctxWithIdentity(admin())
+	adm := map[string]AdmissionRule{"team-a": {RequireScannedEnvironments: boolPtr(true)}}
+	resp, err := s.UpdatePolicy(ctx, UpdatePolicyRequestObject{Body: &UpdatePolicy{Admission: &adm}})
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	rule := (*mustResponse[UpdatePolicy200JSONResponse](t, resp).Admission)["team-a"]
+	if rule.RequireScannedEnvironments == nil || !*rule.RequireScannedEnvironments {
+		t.Errorf("admission rule after put = %+v, want require_scanned_environments round-tripped", rule)
+	}
+}
+
+// Verdict hygiene (#58): a scan verdict attests the exact packages and base
+// image it scanned, so an edit changing either drops the stored verdict;
+// an edit touching anything else (description, env vars, status moves that
+// keep the content) keeps it.
+func TestScanVerdictDropsWhenScannedContentChanges(t *testing.T) {
+	s := &Server{Store: newMemStore(t), PolicySeed: PolicyConfig{Environments: []core.Environment{
+		scannedEnvironment("ml-base", &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0")}),
+	}}}
+	ctx := ctxWithIdentity(admin())
+
+	// A description-only edit keeps the verdict.
+	keep := scannedEnvironment("ml-base", &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0")})
+	keep.Description = strPtr("documented")
+	if err := putEnvironments(t, s, ctx, []core.Environment{keep}); err != nil {
+		t.Fatalf("description edit: %v", err)
+	}
+	if got := catalogByName(t, s, ctx)["ml-base"]; got.Scan == nil || got.Scan.Status != Clean {
+		t.Errorf("verdict after a description-only edit = %+v, want kept", got.Scan)
+	}
+
+	// A packages edit drops it.
+	bump := scannedEnvironment("ml-base", &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0")})
+	bump.Packages = []string{"numpy==1.26.4", "pandas==2.2.2"}
+	if err := putEnvironments(t, s, ctx, []core.Environment{bump}); err != nil {
+		t.Fatalf("packages edit: %v", err)
+	}
+	if got := catalogByName(t, s, ctx)["ml-base"]; got.Scan != nil {
+		t.Errorf("verdict after a packages edit = %+v, want dropped (unscanned)", got.Scan)
+	}
+
+	// A base-image edit drops it too, even when the incoming entry echoes a
+	// fresh-looking verdict.
+	rebase := scannedEnvironment("ml-base", &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0")})
+	rebase.Packages = bump.Packages
+	rebase.BaseImage = "rayproject/ray:2.10.0"
+	if err := putEnvironments(t, s, ctx, []core.Environment{rebase}); err != nil {
+		t.Fatalf("base image edit: %v", err)
+	}
+	if got := catalogByName(t, s, ctx)["ml-base"]; got.Scan != nil {
+		t.Errorf("verdict after a base-image edit = %+v, want dropped (unscanned)", got.Scan)
+	}
+}
+
+
 // The environment reference resolves at admission (#55): a cluster naming
 // a published environment persists the pinned resolution (name, base image,
 // compiled runtime_env, resolved-at) on its spec; an unknown name is a 400

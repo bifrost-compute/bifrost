@@ -452,7 +452,7 @@ func (s *Server) CreateCluster(ctx context.Context, req CreateClusterRequestObje
 	if spec.Environment != nil {
 		envResolved, rerr := s.resolveEnvironment(ctx, spec.Project, *spec.Environment, &spec.Image)
 		if rerr != nil {
-			s.denyCreate(ctx, identity, body.Id, "environment_rejected", http.StatusBadRequest)
+			s.denyCreate(ctx, identity, body.Id, environmentAuditReason(rerr), http.StatusBadRequest)
 			return nil, rerr
 		}
 		spec.EnvironmentResolved = envResolved
