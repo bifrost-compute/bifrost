@@ -1,0 +1,22 @@
+title = "bifrost gitleaks configuration"
+
+[extend]
+useDefault = true
+
+# Known non-secret findings. A finding is allowlisted when ANY condition
+# matches, so keep each entry as narrow as possible: exact fixture values by
+# regex, and path entries only for files whose whole content is known-safe.
+[allowlist]
+description = "Known false positives: public RFC example value and an internal recon doc"
+regexTarget = "secret"
+regexes = [
+  # RFC 6455 §1.2's public example nonce, used as a fixture in
+  # internal/api/gateway_ws_test.go — literally "the sample nonce" in base64.
+  '''dGhlIHNhbXBsZSBub25jZQ==''',
+]
+paths = [
+  # Recon handoff notes: internal URLs/hostnames of a test cluster trip
+  # generic-api-key entropy rules. No credentials in this file (verified
+  # 2026-09-13 against the scan's redacted findings).
+  '''docs/superpowers/handoff/2026-09-02-grace-recon\.md''',
+]

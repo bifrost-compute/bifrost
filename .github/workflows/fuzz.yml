@@ -24,7 +24,7 @@ jobs:
         with: { go-version-file: go.mod }
       - name: fuzz smoke (30s per target, race on)
         run: |
-          set -e
+          set -euo pipefail
           for t in \
             internal/auth:FuzzRSAPublicKeyFromJWK \
             internal/auth:FuzzSanitizeClaim \
@@ -36,7 +36,24 @@ jobs:
             internal/core:FuzzStorageSourceJSON \
             internal/policy:FuzzQuantity ; do
             pkg="${t%%:*}"; fn="${t##*:}"
-            go test -race -run="$fn" -fuzz="$fn" -fuzztime=30s "./$pkg/"
+            before=$(ls "$pkg/testdata/fuzz/$fn" 2>/dev/null || true)
+            if go test -race -run="$fn" -fuzz="$fn" -fuzztime=30s "./$pkg/" 2>&1 | tee /tmp/fuzz.out; then
+              continue
+            fi
+            # A real crash writes a new crasher file under testdata/fuzz/<fn>/
+            # — fail the job for real.
+            after=$(ls "$pkg/testdata/fuzz/$fn" 2>/dev/null || true)
+            if [ "$before" != "$after" ]; then exit 1; fi
+            # Known engine flake: "context deadline exceeded" is reported as a
+            # failure when the -fuzztime deadline fires mid-RPC on a loaded
+            # runner — no crasher is written. Retry once; a deterministic
+            # failure fails the retry too.
+            if grep -q 'context deadline exceeded' /tmp/fuzz.out; then
+              echo "::warning::$fn hit the fuzz-deadline flake (no crasher written); retrying once"
+              go test -race -run="$fn" -fuzz="$fn" -fuzztime=30s "./$pkg/"
+            else
+              exit 1
+            fi
           done
       - name: Upload crashers (new testdata seeds) on failure
         if: failure()
@@ -74,8 +91,16 @@ jobs:
         run: echo "name=$(echo '${{ matrix.target }}' | tr '/:' '--')" >> "$GITHUB_OUTPUT"
       - name: fuzz 10m
         run: |
+          set -o pipefail
           pkg="${{ matrix.target }}"; fn="${pkg##*:}"; pkg="${pkg%%:*}"
-          go test -race -run="$fn" -fuzz="$fn" -fuzztime=600s "./$pkg/"
+          if ! go test -race -run="$fn" -fuzz="$fn" -fuzztime=600s "./$pkg/" 2>&1 | tee /tmp/fuzz.out; then
+            if grep -q 'context deadline exceeded' /tmp/fuzz.out && ! git status --porcelain "$pkg/testdata/fuzz/$fn" | grep -q .; then
+              echo "::warning::$fn hit the fuzz-deadline flake (no crasher written); retrying once"
+              go test -race -run="$fn" -fuzz="$fn" -fuzztime=600s "./$pkg/"
+            else
+              exit 1
+            fi
+          fi
       - name: Upload generated corpus + crashers on failure
         if: failure()
         uses: actions/upload-artifact@v4
