@@ -167,7 +167,7 @@ jobs:
           kubectl -n kuberay logs deploy/kuberay-operator --tail=300 || true
       - name: Upload shard results
         if: always() && steps.suite.conclusion != 'skipped'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: l3-kind-${{ matrix.shard.name }}
           path: l3.json
@@ -192,7 +192,7 @@ jobs:
           IN=$(ls shards/*/l3.json | paste -sd, -)
           echo "merging: $IN"
           go run ./test/requirements/cmd/reqreport -in "$IN" -lane l3 -out l3-report -allow-untested
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: l3-kind
           path: |

@@ -57,7 +57,7 @@ jobs:
           done
       - name: Upload crashers (new testdata seeds) on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers-smoke
           path: internal/**/testdata/fuzz/
@@ -103,7 +103,7 @@ jobs:
           fi
       - name: Upload generated corpus + crashers on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus-${{ steps.slug.outputs.name }}
           path: |
