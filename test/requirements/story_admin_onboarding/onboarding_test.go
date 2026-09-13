@@ -66,6 +66,13 @@ func setPolicySections(t *testing.T, tgt req.Target, sections string) []byte {
 			}
 			restore.Storage = &storage
 		}
+		if body.Environments != nil {
+			environments := []client.EnvironmentSpec{}
+			if before.JSON200.Environments != nil {
+				environments = *before.JSON200.Environments
+			}
+			restore.Environments = &environments
+		}
 		_, _ = admin.UpdatePolicyWithResponse(context.Background(), restore)
 	})
 	return r.Body
@@ -116,6 +123,7 @@ type auditRow struct {
 func TestAdminOnboardsTeamA(t *testing.T) {
 	tgt := target.Get(t)
 	req.Covers(t, 7, "the administrator onboards team-a with a profile and an image allowlist; out-of-scope and off-list creates are 400 and audited")
+	req.Covers(t, 7, "a published environment from the governed catalog resolves at admission for its project; foreign and unknown references are 400 and audited")
 	req.Covers(t, 12, "team-a's storage entry is referenced by name; another project's reference is 400 and no Secret value ever crosses the API")
 	req.Covers(t, 13, "the administrator creates a compute pool and allocates team-a into it; a developer's pool mutation is 403")
 	ctx := context.Background()
@@ -210,6 +218,39 @@ func TestAdminOnboardsTeamA(t *testing.T) {
 		t.Fatalf("create with unknown storage = %d %s, want 400", st, body)
 	}
 
+	// Environments (#52/#55): a published entry scoped to team-a, its base
+	// image the canonical one so the reference alone decides the outcome.
+	// dev-a's create resolves it at admission; dev-b's reference of a
+	// foreign entry and any unknown name are 400.
+	envName := req.Name("onbenv")
+	envImage := fixture.RayImage()
+	envStatus := client.Published
+	envs, _ := json.Marshal([]client.EnvironmentSpec{{
+		Name:      envName,
+		BaseImage: &envImage,
+		Packages:  &[]string{"numpy==1.26.4"},
+		EnvVars:   &map[string]string{"OMP_NUM_THREADS": "4"},
+		Projects:  &[]string{"team-a"},
+		Status:    &envStatus,
+	}})
+	setPolicySections(t, tgt, fmt.Sprintf(`{"environments":%s}`, envs))
+
+	envBody := fixture.ClusterBody(req.Name("onbe"), "team-a", nil)
+	envBody.Spec.Environment = &envName
+	if st, body := createCluster(t, tgt, "dev-a", envBody); st != http.StatusCreated {
+		t.Fatalf("dev-a create referencing team-a's environment = %d %s, want 201", st, body)
+	}
+	crossEnv := fixture.ClusterBodyWithImage(req.Name("onbef"), "team-b", "registry.example/ray:2.56.0", nil)
+	crossEnv.Spec.Environment = &envName
+	if st, body := createCluster(t, tgt, "dev-b", crossEnv); st != http.StatusBadRequest {
+		t.Fatalf("dev-b referencing team-a's environment = %d %s, want 400", st, body)
+	}
+	unknownEnv := fixture.ClusterBody(req.Name("onbeu"), "team-a", nil)
+	unknownEnv.Spec.Environment = &[]string{req.Name("nosuchenv")}[0]
+	if st, body := createCluster(t, tgt, "dev-a", unknownEnv); st != http.StatusBadRequest {
+		t.Fatalf("create with unknown environment = %d %s, want 400", st, body)
+	}
+
 	// Nothing resolved ever crosses the wire: the policy view carries only
 	// names and delivery instructions, cluster views carry no resolution,
 	// and the audit trail never saw a Secret's name or value.
@@ -277,6 +318,8 @@ func TestAdminOnboardsTeamA(t *testing.T) {
 		{devB, "image_not_allowed"},       // team-b outside its allowlist
 		{devB, "storage_rejected"},        // team-b referencing team-a's entry
 		{devA, "storage_rejected"},        // unknown storage name
+		{devB, "environment_rejected"},    // team-b referencing team-a's environment
+		{devA, "environment_rejected"},    // unknown environment name
 	} {
 		if !deny(want[0], want[1]) {
 			t.Errorf("no deny row for subject %s reason %s", want[0], want[1])

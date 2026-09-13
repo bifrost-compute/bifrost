@@ -12,8 +12,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/bifrost-compute/bifrost/internal/auth"
 	"github.com/bifrost-compute/bifrost/internal/controller"
@@ -69,8 +71,9 @@ func rayJobSpecFromWire(w *RayJobSpec) (core.RayJobSpec, error) {
 		name := *w.Profile
 		spec.Profile = &name
 	}
-	// environment (#52) is inert here: accepted and stored verbatim;
-	// resolution against the catalog arrives with #55.
+	// environment (#52) names the catalog entry the job runs with;
+	// finishJobSpec resolves it against the catalog (#55) after profile
+	// expansion.
 	if w.Environment != nil && *w.Environment != "" {
 		name := *w.Environment
 		spec.Environment = &name
@@ -113,6 +116,24 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 			return "profile_rejected", perr
 		}
 	}
+	// Environment resolution (#55): a spec names an environment OR writes
+	// its own runtime_env_yaml, never both — profile expansion's
+	// whole-or-nothing rule, so a workload never runs a half-merged
+	// environment. Resolution compiles the catalog entry into the governed
+	// runtime_env the job's CR carries and pins it on the spec, so a later
+	// catalog edit is never retroactive.
+	if spec.Environment != nil && strings.TrimSpace(spec.RuntimeEnvYaml) != "" {
+		return "environment_rejected", badRequest(fmt.Sprintf("environment %q and runtime_env_yaml are alternatives; name an environment or write a runtime_env, not both", *spec.Environment))
+	}
+	var envResolved *core.ResolvedEnvironment
+	if spec.Environment != nil {
+		r, rerr := s.resolveEnvironment(ctx, view.Project, *spec.Environment, &view.Image)
+		if rerr != nil {
+			return "environment_rejected", rerr
+		}
+		envResolved = r
+		spec.RuntimeEnvYaml = r.RuntimeEnvYaml
+	}
 	if view.Image == "" {
 		return "invalid_spec", badRequest("image is required")
 	}
@@ -141,11 +162,18 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 	}
 	// runtime_env governance (#53): the spec's runtime_env_yaml rides
 	// verbatim into the RayJob CR, so it is parsed and checked against the
-	// platform rule set here, before the spec is ever persisted. The
-	// --allow-ungoverned-runtime-env serve flag restores the pre-#53
-	// verbatim passthrough for upgraders.
+	// project's effective rule set (runtimeEnvPolicyFor — the admission
+	// rule's runtime-env knobs, governed defaults otherwise) here, before
+	// the spec is ever persisted. An environment's compiled runtime_env
+	// (#55) takes the same path: resolution already validated it, and the
+	// check is idempotent. The --allow-ungoverned-runtime-env serve flag
+	// restores the pre-#53 verbatim passthrough for upgraders.
 	if !s.RuntimeEnvUngoverned {
-		if verr := (RuntimeEnvPolicy{}).Validate(spec.RuntimeEnvYaml); verr != nil {
+		runtimeEnvPolicy, perr := s.runtimeEnvPolicyFor(ctx, view.Project)
+		if perr != nil {
+			return "", wrapStoreErr(perr)
+		}
+		if verr := runtimeEnvPolicy.Validate(spec.RuntimeEnvYaml); verr != nil {
 			return "runtime_env_rejected", badRequest(verr.Error())
 		}
 	}
@@ -157,6 +185,7 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 		return "storage_rejected", serr
 	}
 	spec.StorageResolved = resolved
+	spec.EnvironmentResolved = envResolved
 	spec.Image, spec.RayVersion = view.Image, view.RayVersion
 	spec.HeadCpu, spec.HeadMemory = view.HeadCpu, view.HeadMemory
 	spec.WorkerGroups = view.WorkerGroups

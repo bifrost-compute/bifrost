@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/bifrost-compute/bifrost/pkg/client"
 	"github.com/bifrost-compute/bifrost/test/requirements/fixture"
 	"github.com/bifrost-compute/bifrost/test/requirements/req"
 	"github.com/bifrost-compute/bifrost/test/requirements/target"
@@ -266,4 +267,77 @@ func TestJobRuntimeEnvIsGovernedAtAdmission(t *testing.T) {
 	env := "env_vars:\n  REQ_PROBE: governed\nconfig:\n  setup_timeout_seconds: 300"
 	legal.Spec.RuntimeEnvYaml = &env
 	fixture.MustSubmitJob(t, tgt, "dev-a", legal)
+}
+
+// Environment resolution at admission (#55): a job may name a published
+// environment from the governed catalog and runs with its compiled
+// runtime_env; an unknown name and a hand-written runtime_env_yaml next to
+// a named environment (whole-or-nothing) are 400 and nothing is submitted.
+// The environment carries no pip packages: the admitted job must not
+// pip-install on default-deny egress lanes.
+func TestJobEnvironmentIsResolvedAtAdmission(t *testing.T) {
+	tgt := target.Get(t)
+	req.Covers(t, 5, "a job may name a published environment; unknown names and environment+runtime_env_yaml conflicts are 400 and nothing is submitted")
+	ctx := context.Background()
+	admin := tgt.As("admin").API()
+
+	before, err := admin.GetPolicyWithResponse(ctx)
+	if err != nil || before.JSON200 == nil {
+		t.Fatalf("get_policy: err=%v status=%v body=%s", err, before.StatusCode(), before.Body)
+	}
+	envName := req.Name("jenv")
+	envImage := fixture.RayImage()
+	envStatus := client.Published
+	envs := []client.EnvironmentSpec{{
+		Name:      envName,
+		BaseImage: &envImage,
+		EnvVars:   &map[string]string{"REQ_PROBE": "environment"},
+		Status:    &envStatus,
+	}}
+	put, err := admin.UpdatePolicyWithResponse(ctx, client.UpdatePolicyJSONRequestBody{Environments: &envs})
+	if err != nil || put.StatusCode()/100 != 2 {
+		t.Fatalf("update_policy environments: err=%v status=%v body=%s", err, put.StatusCode(), put.Body)
+	}
+	t.Cleanup(func() {
+		restore := []client.EnvironmentSpec{}
+		if before.JSON200.Environments != nil {
+			restore = *before.JSON200.Environments
+		}
+		_, _ = admin.UpdatePolicyWithResponse(context.Background(), client.UpdatePolicyJSONRequestBody{Environments: &restore})
+	})
+
+	// The happy path: a published environment naming the canonical image
+	// resolves and the job is admitted.
+	okBody := fixture.SubmitJobBody(req.Name("jok"), "team-a", okEntrypoint, quickTTL())
+	okBody.Spec.Environment = &envName
+	fixture.MustSubmitJob(t, tgt, "dev-a", okBody)
+
+	// An unknown name is a 400 and persists nothing.
+	unknown := fixture.SubmitJobBody(req.Name("jno"), "team-a", okEntrypoint, quickTTL())
+	unknownName := req.Name("nosuchenv")
+	unknown.Spec.Environment = &unknownName
+	resp, err := tgt.As("dev-a").API().SubmitJobWithResponse(ctx, unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("submit with unknown environment = %d %s, want 400", resp.StatusCode(), resp.Body)
+	}
+	if g, gerr := tgt.As("admin").API().GetJobWithResponse(ctx, *unknown.Id); gerr != nil || g.StatusCode() != http.StatusNotFound {
+		t.Fatalf("a refused submit must persist nothing; get_job = %v", codeOf(g))
+	}
+
+	// Whole-or-nothing: environment and a hand-written runtime_env_yaml in
+	// the same request are a 400.
+	both := fixture.SubmitJobBody(req.Name("jb2"), "team-a", okEntrypoint, quickTTL())
+	both.Spec.Environment = &envName
+	handwritten := "env_vars:\n  REQ_PROBE: hand-written"
+	both.Spec.RuntimeEnvYaml = &handwritten
+	resp, err = tgt.As("dev-a").API().SubmitJobWithResponse(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("submit with environment + runtime_env_yaml = %d %s, want 400", resp.StatusCode(), resp.Body)
+	}
 }

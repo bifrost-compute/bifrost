@@ -650,3 +650,40 @@ func TestSubmitJobRuntimeEnvUngovernedRestoresPassthrough(t *testing.T) {
 		t.Fatalf("stored env = %+v, want the verbatim passthrough", stored)
 	}
 }
+
+// The AdmissionRule runtime-env knobs (#52) are live (#55): the validator
+// reads the project's effective rule set, so a package denylist or a
+// permitted field is API-editable per project instead of a platform-wide
+// hardcode. A project with no knobs set gets the governed defaults.
+func TestSubmitJobReadsRuntimeEnvKnobsFromTheAdmissionRule(t *testing.T) {
+	store := newMemStore(t)
+	s := &Server{Store: store, PolicySeed: PolicyConfig{Admission: map[string]core.AdmissionRule{
+		"team-a": {PackageDenylist: []string{"torch"}, AllowConda: true},
+	}}}
+	admin := testIdentity("admin", auth.RoleAdmin)
+
+	submitWithEnv := func(jobID, project, env string) int {
+		body := jobBodyFor(project)
+		body.Id = strPtr(jobID)
+		body.Spec.RuntimeEnvYaml = &env
+		_, err := s.SubmitJob(ctxWithIdentity(admin), SubmitJobRequestObject{Body: &body})
+		return okOr(t, err)
+	}
+
+	// team-a's denylist refuses a pinned torch the governed defaults would
+	// have admitted; team-b (no rule) still admits it.
+	if got := submitWithEnv("job-denied", "team-a", "pip: [torch==2.1.0]"); got != http.StatusBadRequest {
+		t.Errorf("denylisted package = %d, want 400", got)
+	}
+	if got := submitWithEnv("job-defaults", "team-b", "pip: [torch==2.1.0]"); got != http.StatusOK {
+		t.Errorf("no rule = governed defaults, want accepted; got %d", got)
+	}
+	// team-a's allow_conda permits what the defaults deny; team-b is still
+	// refused.
+	if got := submitWithEnv("job-conda", "team-a", "conda:\n  dependencies: [python=3.11]"); got != http.StatusOK {
+		t.Errorf("allow_conda project = %d, want accepted", got)
+	}
+	if got := submitWithEnv("job-conda-b", "team-b", "conda:\n  dependencies: [python=3.11]"); got != http.StatusBadRequest {
+		t.Errorf("conda without the knob = %d, want 400", got)
+	}
+}

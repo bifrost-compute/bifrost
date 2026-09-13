@@ -1,19 +1,24 @@
 // Environment catalog (#52): named, governed compute environments — base
 // image, pinned packages, env vars — a job or cluster spec refers to by
-// name (`RayJobSpec.environment`, `ClusterSpec.environment`; both inert
-// here: accepted and stored, resolution arrives with the catalog issues
-// #54/#55). The catalog rides the policy row like the profile (#7) and
-// storage (#12) catalogs; this file is the read side (list_environments,
-// mirroring profiles.go) and the wire<->core conversion and validation
-// settings.go's policy PUT runs on the `environments` section.
+// name (`RayJobSpec.environment`, `ClusterSpec.environment`). The catalog
+// rides the policy row like the profile (#7) and storage (#12) catalogs;
+// this file is the read side (list_environments, mirroring profiles.go),
+// the wire<->core conversion and validation settings.go's policy PUT runs
+// on the `environments` section, and the resolution (#55) finishJobSpec and
+// CreateCluster run when a spec names an environment.
 package api
 
 import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/bifrost-compute/bifrost/internal/auth"
+	"github.com/bifrost-compute/bifrost/internal/controller"
 	"github.com/bifrost-compute/bifrost/internal/core"
 )
 
@@ -176,6 +181,9 @@ func environmentsFromWire(in []EnvironmentSpec) ([]core.Environment, error) {
 			if err := (RuntimeEnvPolicy{}).Validate(*w.RuntimeEnvYaml); err != nil {
 				return nil, badRequest(what + "runtime_env_yaml: " + err.Error())
 			}
+			if err := environmentEscapeHatchDisjoint(e, *w.RuntimeEnvYaml); err != nil {
+				return nil, badRequest(what + err.Error())
+			}
 			e.RuntimeEnvYaml = *w.RuntimeEnvYaml
 		}
 		if w.Projects != nil {
@@ -199,4 +207,154 @@ func environmentsFromWire(in []EnvironmentSpec) ([]core.Environment, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// environmentEscapeHatchDisjoint refuses the one ambiguity an environment
+// definition can carry: the structured fields (packages, env_vars) and the
+// runtime_env_yaml escape hatch both fixing the same thing. The catalog is
+// validated at the edit (the storage/profile rule), so the overlap is a
+// 400 here rather than a silently-arbitrary merge winner at every later
+// resolution. pip overlaps when packages is non-empty and the hatch sets
+// pip at all; env_vars overlaps per key.
+func environmentEscapeHatchDisjoint(e core.Environment, hatch string) error {
+	var doc map[string]interface{}
+	if err := yaml.NewDecoder(strings.NewReader(hatch)).Decode(&doc); err != nil {
+		return fmt.Errorf("runtime_env_yaml is not a valid YAML mapping: %v", err)
+	}
+	if len(e.Packages) > 0 {
+		if _, dup := doc["pip"]; dup {
+			return fmt.Errorf("runtime_env_yaml sets pip while packages is non-empty; fix the package list in one place, not both")
+		}
+	}
+	if hatchVars, ok := doc["env_vars"].(map[string]interface{}); ok {
+		for k := range hatchVars {
+			if _, dup := e.EnvVars[k]; dup {
+				return fmt.Errorf("runtime_env_yaml env_vars[%q] duplicates env_vars[%q]; fix the variable in one place, not both", k, k)
+			}
+		}
+	}
+	return nil
+}
+
+// environmentAvailableTo reports whether project may reference e: an empty
+// project list means every project (storageAvailableTo's rule).
+func environmentAvailableTo(e *core.Environment, project string) bool {
+	if len(e.Projects) == 0 {
+		return true
+	}
+	return containsString(e.Projects, project)
+}
+
+// compileEnvironment renders e into the governed runtime_env YAML document
+// a reference resolves to (#55): packages become the pip list, env_vars the
+// env_vars mapping, and the runtime_env_yaml escape hatch merges in the
+// fields the structured form cannot express (working_dir, py_modules,
+// config — and pip/env_vars only where the structured fields leave them
+// unset, an overlap the catalog edit refuses). Should a catalog row carry
+// an overlap anyway (a hand-written policy seed never passed the edit
+// validation), the structured field wins: packages override the hatch's
+// pip, env_vars override its env_vars per key. "" when the environment
+// carries no runtime env at all.
+func compileEnvironment(e *core.Environment) (string, error) {
+	doc := map[string]interface{}{}
+	if strings.TrimSpace(e.RuntimeEnvYaml) != "" {
+		if err := yaml.NewDecoder(strings.NewReader(e.RuntimeEnvYaml)).Decode(&doc); err != nil {
+			return "", fmt.Errorf("environment %q runtime_env_yaml is not a valid YAML mapping: %v", e.Name, err)
+		}
+	}
+	if len(e.Packages) > 0 {
+		pip := make([]interface{}, len(e.Packages))
+		for i, pkg := range e.Packages {
+			pip[i] = pkg
+		}
+		doc["pip"] = pip
+	}
+	if len(e.EnvVars) > 0 {
+		vars, _ := doc["env_vars"].(map[string]interface{})
+		if vars == nil {
+			vars = make(map[string]interface{}, len(e.EnvVars))
+		}
+		for k, v := range e.EnvVars {
+			vars[k] = v
+		}
+		doc["env_vars"] = vars
+	}
+	if len(doc) == 0 {
+		return "", nil
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("environment %q does not compile: %v", e.Name, err)
+	}
+	return string(out), nil
+}
+
+// resolveEnvironment resolves name against the effective policy's
+// environment catalog for project (#55), mirroring resolveStorage: an
+// unknown name, an entry the project may not use, or an entry that is not
+// published (a draft is not selectable yet; a deprecated one stays
+// resolvable for already-admitted specs but takes no new references) is a
+// 400, never a workload that silently runs without its environment. The
+// environment's base image fills *image the way a profile's image fills the
+// shape (plan ruling D4): an empty *image takes it, a differing one is the
+// whole-or-nothing conflict 400; the admission image allowlist then applies
+// to it as to any spec image. The compiled runtime_env passes the same
+// governance validation a hand-written runtime_env_yaml gets — under the
+// project's admission-rule knobs — before the resolution is returned.
+// Store failures surface as 5xx through wrapStoreErr.
+func (s *Server) resolveEnvironment(ctx context.Context, project, name string, image *string) (*core.ResolvedEnvironment, error) {
+	p, err := effectivePolicy(ctx, s.Store, &s.PolicySeed)
+	if err != nil {
+		return nil, wrapStoreErr(err)
+	}
+	var env *core.Environment
+	if p != nil {
+		for i := range p.Environments {
+			if p.Environments[i].Name == name {
+				env = &p.Environments[i]
+				break
+			}
+		}
+	}
+	if env == nil {
+		return nil, badRequest(fmt.Sprintf("no such environment %q", name))
+	}
+	if !environmentAvailableTo(env, project) {
+		return nil, badRequest(fmt.Sprintf("environment %q is not available to project %q", name, project))
+	}
+	switch env.Status.OrDefault() {
+	case core.EnvironmentStatusPublished:
+	case core.EnvironmentStatusDraft:
+		return nil, badRequest(fmt.Sprintf("environment %q is a draft; only published environments can be referenced", name))
+	default:
+		return nil, badRequest(fmt.Sprintf("environment %q is deprecated; stored resolutions keep working but new references are refused", name))
+	}
+	if env.BaseImage != "" {
+		switch {
+		case *image == "":
+			*image = env.BaseImage
+		case *image != env.BaseImage:
+			return nil, badRequest(fmt.Sprintf("environment %q fixes image %q; leave image empty or omit the environment", name, env.BaseImage))
+		}
+	}
+	compiled, err := compileEnvironment(env)
+	if err != nil {
+		return nil, badRequest(err.Error())
+	}
+	if !s.RuntimeEnvUngoverned {
+		pol, perr := s.runtimeEnvPolicyFor(ctx, project)
+		if perr != nil {
+			return nil, wrapStoreErr(perr)
+		}
+		if verr := pol.Validate(compiled); verr != nil {
+			return nil, badRequest(fmt.Sprintf("environment %q compiles to a runtime_env the platform rule set refuses: %v", name, verr))
+		}
+	}
+	at := time.Unix(int64(controller.NowUnix()), 0).UTC()
+	return &core.ResolvedEnvironment{
+		Name:           env.Name,
+		BaseImage:      env.BaseImage,
+		RuntimeEnvYaml: compiled,
+		ResolvedAt:     &at,
+	}, nil
 }

@@ -276,9 +276,9 @@ type AdmissionRule struct {
 
 	// The runtime-env governance knobs (#52) the #53 validator
 	// (api.RuntimeEnvPolicy) hardcoded, carried here so they are
-	// API-editable per project. All zero values keep the governed
-	// defaults; the validator does not read them yet — that wiring is
-	// the environment catalog issue (#54).
+	// API-editable per project; the validator reads them through
+	// api.runtimeEnvPolicyFor (#55). All zero values keep the governed
+	// defaults.
 	// AllowPyExecutable permits the py_executable field. Default deny.
 	AllowPyExecutable bool `json:"allow_py_executable,omitempty"`
 	// AllowImageURI permits the image_uri field. Default deny.
