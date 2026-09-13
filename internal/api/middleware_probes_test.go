@@ -488,7 +488,7 @@ func TestContractOperationCountAnchorsTheBurndown(t *testing.T) {
 		}
 	}
 
-	const wantOperations = 51 // 49 authenticated operations + healthz + version (0.2.0 adds submit_job, get_job, delete_job, list_profiles)
+	const wantOperations = 52 // 50 authenticated operations + healthz + version (0.2.0 adds submit_job, get_job, delete_job, list_profiles; #52 adds list_environments)
 	if operations != wantOperations {
 		t.Errorf("contract declares %d operations across %d paths, want %d — "+
 			"if the vendored contract legitimately changed, the 501 burn-down count moves with it",

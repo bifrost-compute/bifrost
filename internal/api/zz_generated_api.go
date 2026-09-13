@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oapi-codegen/runtime"
 )
@@ -46,6 +47,48 @@ func (e Engine) Valid() bool {
 	case Dask:
 		return true
 	case Ray:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for EnvironmentScanStatus.
+const (
+	Clean   EnvironmentScanStatus = "clean"
+	Failed  EnvironmentScanStatus = "failed"
+	Pending EnvironmentScanStatus = "pending"
+)
+
+// Valid indicates whether the value is a known member of the EnvironmentScanStatus enum.
+func (e EnvironmentScanStatus) Valid() bool {
+	switch e {
+	case Clean:
+		return true
+	case Failed:
+		return true
+	case Pending:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for EnvironmentSpecStatus.
+const (
+	Deprecated EnvironmentSpecStatus = "deprecated"
+	Draft      EnvironmentSpecStatus = "draft"
+	Published  EnvironmentSpecStatus = "published"
+)
+
+// Valid indicates whether the value is a known member of the EnvironmentSpecStatus enum.
+func (e EnvironmentSpecStatus) Valid() bool {
+	switch e {
+	case Deprecated:
+		return true
+	case Draft:
+		return true
+	case Published:
 		return true
 	default:
 		return false
@@ -208,13 +251,43 @@ func (e UpgradeStrategy) Valid() bool {
 	}
 }
 
-// AdmissionRule Per-project admission limits (#7). Both fields optional; a zero value means unrestricted. Keyed by project (or `"*"` for every project) in `PolicyView.admission`.
+// AdmissionRule Per-project admission limits (#7), plus the runtime-env governance knobs (#52) PR #74 hardcoded into the validator — carried here so they are API-editable. All fields optional; a zero value means unrestricted / the governed default. Keyed by project (or `"*"` for every project) in `PolicyView.admission`.
 type AdmissionRule struct {
+	// AllowConda Permit the runtime_env conda field (an environment file whose channels the control plane cannot audit); false = denied (#53).
+	AllowConda *bool `json:"allow_conda,omitempty"`
+
+	// AllowImageUri Permit the runtime_env image_uri field (an arbitrary per-worker container image, bypassing allowed_images); false = denied (#53).
+	AllowImageUri *bool `json:"allow_image_uri,omitempty"`
+
+	// AllowPyExecutable Permit the runtime_env py_executable field (an interpreter binary the platform cannot attest); false = denied (#53).
+	AllowPyExecutable *bool `json:"allow_py_executable,omitempty"`
+
+	// AllowUnpinnedPackages Permit pip entries not pinned to an exact version; false = name==version required (#53).
+	AllowUnpinnedPackages *bool `json:"allow_unpinned_packages,omitempty"`
+
 	// AllowedImages Container images a cluster/job in the project may use; empty = any image.
 	AllowedImages *[]string `json:"allowed_images,omitempty"`
 
+	// AllowedIndexHosts Hosts trusted as package indexes: pip_install_options may redirect --index-url/--extra-index-url/--find-links only to one of these; empty = no index redirection at all (#53).
+	AllowedIndexHosts *[]string `json:"allowed_index_hosts,omitempty"`
+
+	// AllowedRemoteHosts Hosts remote working_dir/py_modules URIs may point at (with allowed_remote_schemes); empty = local uploads only (#53).
+	AllowedRemoteHosts *[]string `json:"allowed_remote_hosts,omitempty"`
+
+	// AllowedRemoteSchemes URI schemes remote working_dir/py_modules may use (with allowed_remote_hosts); empty = local uploads only (#53).
+	AllowedRemoteSchemes *[]string `json:"allowed_remote_schemes,omitempty"`
+
+	// MaxDocumentBytes Cap on the raw runtime_env_yaml document size; 0 = the platform default (64 KiB) (#53).
+	MaxDocumentBytes *int64 `json:"max_document_bytes,omitempty"`
+
+	// MaxSetupTimeoutSeconds Cap on runtime_env config.setup_timeout_seconds; 0 = the platform default (600) (#53).
+	MaxSetupTimeoutSeconds *int64 `json:"max_setup_timeout_seconds,omitempty"`
+
 	// MaxWorkers Maximum total worker replicas across all worker groups; 0 = unlimited.
 	MaxWorkers *int32 `json:"max_workers,omitempty"`
+
+	// PackageDenylist PyPI-normalized package names (PEP 503) that must never install, pinned or not (#53).
+	PackageDenylist *[]string `json:"package_denylist,omitempty"`
 }
 
 // AllocationSpec A project's allocation within a pool (translates to a Kueue LocalQueue).
@@ -486,9 +559,12 @@ type ClusterSpec struct {
 	// Engine Which compute engine backs this cluster. `#[serde(default)]` = Ray, so
 	// every pre-multi-engine spec and every Ray client keeps working
 	// untouched.
-	Engine     *Engine `json:"engine,omitempty"`
-	HeadCpu    string  `json:"head_cpu"`
-	HeadMemory string  `json:"head_memory"`
+	Engine *Engine `json:"engine,omitempty"`
+
+	// Environment Environment catalog name (#52) whose image, packages and env vars this cluster runs with; `null` = none. Accepted and stored; resolution arrives with the catalog issue.
+	Environment *string `json:"environment,omitempty"`
+	HeadCpu     string  `json:"head_cpu"`
+	HeadMemory  string  `json:"head_memory"`
 
 	// IdleTimeoutSecs **Inactivity reap window** in seconds (#100): the cluster is reaped once
 	// it has been *idle* — no job activity — for this long, so a busy cluster
@@ -654,6 +730,60 @@ type DeployService struct {
 // as before.
 type Engine string
 
+// EnvironmentScan The recorded vulnerability-scan verdict for an environment (#52): an administrator records the outcome of the offline scan workflow (trivy/grype on the base image, pip-audit on the package list) here; the control plane does not scan itself.
+type EnvironmentScan struct {
+	// ScannedAt When the scan ran.
+	ScannedAt *time.Time `json:"scanned_at,omitempty"`
+
+	// Scanner What produced the verdict (e.g. "trivy 0.57.0", "pip-audit 2.7").
+	Scanner *string `json:"scanner,omitempty"`
+
+	// Status The verdict: clean | failed | pending.
+	Status EnvironmentScanStatus `json:"status"`
+}
+
+// EnvironmentScanStatus The verdict: clean | failed | pending.
+type EnvironmentScanStatus string
+
+// EnvironmentSpec A named, governed compute environment in the environment catalog (#52): the base image, pinned packages and env vars a job or cluster gets when its spec names this environment (`RayJobSpec.environment`, `ClusterSpec.environment`). Environments compile to a governed runtime_env (#53); `runtime_env_yaml` is the documented escape hatch. Inert in #52: references are accepted and stored, resolution arrives with the catalog issue.
+type EnvironmentSpec struct {
+	// BaseImage Container image the environment builds on; admission image allowlists apply to it as to any spec image.
+	BaseImage *string `json:"base_image,omitempty"`
+
+	// Description Human-readable summary shown by clients.
+	Description *string `json:"description,omitempty"`
+
+	// EnvVars Environment variables every workload using this environment runs with; empty = none.
+	EnvVars *map[string]string `json:"env_vars,omitempty"`
+
+	// Name Catalog name a spec refers to (an RFC 1123 label, so it can ride Kubernetes object names).
+	Name string `json:"name"`
+
+	// Packages Pip requirements, each pinned to an exact version (`name[extras]==version`) — the same pin rule the runtime_env governance validator (#53) enforces. Empty = the base image alone.
+	Packages *[]string `json:"packages,omitempty"`
+
+	// Projects Projects that may use this environment; empty = every project.
+	Projects *[]string `json:"projects,omitempty"`
+
+	// PublishedAt When the environment was published; `null` while in draft.
+	PublishedAt *time.Time `json:"published_at,omitempty"`
+
+	// PublishedBy The identity that published the environment; `null` while in draft.
+	PublishedBy *string `json:"published_by,omitempty"`
+
+	// RuntimeEnvYaml Escape hatch: an extra Ray runtime_env YAML document merged in at resolution time, governed by the same validator (#53) a job's own runtime_env_yaml passes. Empty = none.
+	RuntimeEnvYaml *string `json:"runtime_env_yaml,omitempty"`
+
+	// Scan The scan verdict recorded for this environment; `null` = never scanned.
+	Scan *EnvironmentScan `json:"scan,omitempty"`
+
+	// Status Lifecycle state: a draft is editable and not yet selectable, published is selectable by specs, deprecated stays resolvable for existing references but should not be picked for new work. Absent = draft.
+	Status *EnvironmentSpecStatus `json:"status,omitempty"`
+}
+
+// EnvironmentSpecStatus Lifecycle state: a draft is editable and not yet selectable, published is selectable by specs, deprecated stays resolvable for existing references but should not be picked for new work. Absent = draft.
+type EnvironmentSpecStatus string
+
 // FlavorSpec A hardware flavor within a pool: node selection plus per-resource
 // nominal quota (K8s quantity strings, e.g. "4", "512Gi").
 type FlavorSpec struct {
@@ -817,6 +947,9 @@ type PolicyView struct {
 	// Editable Always true in v1 — the policy is editable via PUT.
 	Editable bool `json:"editable"`
 
+	// Environments The environment catalog (#52); empty when none are configured.
+	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
 	// Prices resource → $/unit-hour; `null` when no price sheet is configured.
 	Prices *map[string]float64 `json:"prices,omitempty"`
 
@@ -964,6 +1097,9 @@ type PutAllocation struct {
 type RayJobSpec struct {
 	// Entrypoint The shell command Ray runs as the job (e.g. `python train.py`).
 	Entrypoint string `json:"entrypoint"`
+
+	// Environment Environment catalog name (#52) whose image, packages and env vars this job runs with; `null` = none. Accepted and stored; resolution arrives with the catalog issue.
+	Environment *string `json:"environment,omitempty"`
 
 	// HeadCpu Head CPU request; default "1" when empty.
 	HeadCpu *string `json:"head_cpu,omitempty"`
@@ -1226,6 +1362,9 @@ type UpdatePolicy struct {
 
 	// Budgets Present replaces the whole budget map (`{}` clears all budgets) (#77).
 	Budgets *map[string]BudgetView `json:"budgets,omitempty"`
+
+	// Environments Present replaces the whole environment catalog (`[]` clears it) (#52).
+	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
 
 	// Prices Present (incl. explicit `null`) replaces/clears the price sheet.
 	Prices *map[string]float64 `json:"prices,omitempty"`
@@ -1619,6 +1758,9 @@ type ServerInterface interface {
 
 	// (POST /api/v1/clusters/{id}/suspend)
 	SuspendCluster(w http.ResponseWriter, r *http.Request, id string)
+
+	// (GET /api/v1/environments)
+	ListEnvironments(w http.ResponseWriter, r *http.Request)
 	// Identity "Who am I": the resolved identity for any authenticated caller. In dev
 	// mode (no validator AND no local auth) the auth middleware attaches no
 	// identity, and this returns the specced dev identity so the
@@ -2501,6 +2643,20 @@ func (siw *ServerInterfaceWrapper) SuspendCluster(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// ListEnvironments operation middleware
+func (siw *ServerInterfaceWrapper) ListEnvironments(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListEnvironments(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // Identity operation middleware
 func (siw *ServerInterfaceWrapper) Identity(w http.ResponseWriter, r *http.Request) {
 
@@ -3222,6 +3378,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/clusters/{id}/nodes", wrapper.ClusterNodes)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/clusters/{id}/resume", wrapper.ResumeCluster)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/clusters/{id}/suspend", wrapper.SuspendCluster)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/environments", wrapper.ListEnvironments)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/identity", wrapper.Identity)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs", wrapper.ListJobs)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/jobs", wrapper.SubmitJob)
@@ -4403,6 +4560,43 @@ func (response SuspendCluster409Response) VisitSuspendClusterResponse(w http.Res
 	return nil
 }
 
+type ListEnvironmentsRequestObject struct {
+}
+
+type ListEnvironmentsResponseObject interface {
+	VisitListEnvironmentsResponse(w http.ResponseWriter) error
+}
+
+type ListEnvironments200JSONResponse []EnvironmentSpec
+
+func (response ListEnvironments200JSONResponse) VisitListEnvironmentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListEnvironments401Response struct {
+}
+
+func (response ListEnvironments401Response) VisitListEnvironmentsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(401)
+	return nil
+}
+
+type ListEnvironments403Response struct {
+}
+
+func (response ListEnvironments403Response) VisitListEnvironmentsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(403)
+	return nil
+}
+
 type IdentityRequestObject struct {
 }
 
@@ -5503,6 +5697,9 @@ type StrictServerInterface interface {
 
 	// (POST /api/v1/clusters/{id}/suspend)
 	SuspendCluster(ctx context.Context, request SuspendClusterRequestObject) (SuspendClusterResponseObject, error)
+
+	// (GET /api/v1/environments)
+	ListEnvironments(ctx context.Context, request ListEnvironmentsRequestObject) (ListEnvironmentsResponseObject, error)
 	// Identity "Who am I": the resolved identity for any authenticated caller. In dev
 	// mode (no validator AND no local auth) the auth middleware attaches no
 	// identity, and this returns the specced dev identity so the
@@ -6319,6 +6516,30 @@ func (sh *strictHandler) SuspendCluster(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(SuspendClusterResponseObject); ok {
 		if err := validResponse.VisitSuspendClusterResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListEnvironments operation middleware
+func (sh *strictHandler) ListEnvironments(w http.ResponseWriter, r *http.Request) {
+	var request ListEnvironmentsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListEnvironments(ctx, request.(ListEnvironmentsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListEnvironments")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListEnvironmentsResponseObject); ok {
+		if err := validResponse.VisitListEnvironmentsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

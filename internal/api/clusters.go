@@ -91,6 +91,7 @@ func clusterSpecFromWire(w *ClusterSpec) (core.ClusterSpec, error) {
 		TtlSeconds:      ttl,
 		IdleTimeoutSecs: idle,
 		Profile:         w.Profile,
+		Environment:     w.Environment,
 		Storage:         storage,
 	}, nil
 }

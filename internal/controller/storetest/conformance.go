@@ -50,6 +50,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bifrost-compute/bifrost/internal/controller"
 	"github.com/bifrost-compute/bifrost/internal/core"
@@ -1487,8 +1488,22 @@ func policyFixture(cpuPrice float64, seed bool) *controller.StoredPolicy {
 			{Name: "analytics", Source: core.StorageSourcePersistentVolumeClaim, ClaimName: "analytics-pvc", Mode: core.StorageModeFile, MountPath: strPtr("/app/data"), Projects: []string{"ml-team"}},
 			{Name: "scratch", Source: core.StorageSourcePersistentVolumeClaim, ClaimName: "scratch-pvc", Mode: core.StorageModeFile, MountPath: strPtr("/srv/scratch"), Projects: []string{}},
 		},
+		// #52: the environment catalog rides the same row. Non-nil so the
+		// SQL round trip (nil -> `[]` -> empty non-nil) stays DeepEqual.
+		Environments: []core.Environment{{
+			Name: "ml-base", Description: strPtr("governed ml base"), BaseImage: "rayproject/ray:2.57.0",
+			Packages: []string{"numpy==1.26.4"}, EnvVars: map[string]string{"OMP_NUM_THREADS": "4"},
+			Projects: []string{"ml-team"}, Status: core.EnvironmentStatusPublished,
+			PublishedBy: strPtr("root"), PublishedAt: &policyFixturePublishedAt,
+			Scan: &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0"), ScannedAt: &policyFixturePublishedAt},
+		}},
 	}
 }
+
+// policyFixturePublishedAt is the fixture environment's publication time,
+// UTC so the JSON round trip (RFC 3339, no monotonic clock) stays
+// DeepEqual.
+var policyFixturePublishedAt = time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 
 func runPolicyConformance(t *testing.T, store controller.Store) {
 	ctx := context.Background()
@@ -1545,9 +1560,10 @@ func runPolicySeedConformance(t *testing.T, store controller.Store) {
 		FromFileSeed: true,
 		// Empty non-nil for the same reason as Budgets: the SQL stores read
 		// `[]`/`{}` back as empty non-nil.
-		Profiles:  []core.Profile{},
-		Admission: map[string]core.AdmissionRule{},
-		Storage:   []core.StorageEntry{},
+		Profiles:     []core.Profile{},
+		Admission:    map[string]core.AdmissionRule{},
+		Storage:      []core.StorageEntry{},
+		Environments: []core.Environment{},
 	}
 
 	inserted, err := store.SeedPolicy(ctx, seed)

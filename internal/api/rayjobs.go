@@ -69,6 +69,12 @@ func rayJobSpecFromWire(w *RayJobSpec) (core.RayJobSpec, error) {
 		name := *w.Profile
 		spec.Profile = &name
 	}
+	// environment (#52) is inert here: accepted and stored verbatim;
+	// resolution against the catalog arrives with #55.
+	if w.Environment != nil && *w.Environment != "" {
+		name := *w.Environment
+		spec.Environment = &name
+	}
 	if w.HeadCpu != nil {
 		spec.HeadCpu = *w.HeadCpu
 	}

@@ -45,6 +45,10 @@ type PolicyConfig struct {
 	// that never touches the policy API keeps exactly its old behaviour
 	// while an administrator can tighten one project via PUT.
 	Admission map[string]core.AdmissionRule
+	// Environments is the environment catalog seed (#52): named governed
+	// environments a spec may refer to, riding the policy row like the
+	// profile and storage catalogs.
+	Environments []core.Environment
 	// GPUDefaultSharing defaults to core.DefaultGpuSharing (whole-gpu) at
 	// the zero value only when read through EffectiveGPUDefaultSharing —
 	// a bare PolicyConfig{} leaves this "" (core.GpuSharing's zero value),
@@ -70,7 +74,7 @@ func (c PolicyConfig) EffectiveGPUDefaultSharing() core.GpuSharing {
 // seed_from_config.
 func seedFromConfig(cfg *PolicyConfig) *controller.StoredPolicy {
 	if cfg.Prices == nil && len(cfg.Quotas) == 0 && len(cfg.Budgets) == 0 &&
-		len(cfg.Profiles) == 0 && len(cfg.Admission) == 0 {
+		len(cfg.Profiles) == 0 && len(cfg.Admission) == 0 && len(cfg.Environments) == 0 {
 		return nil
 	}
 	quotas := make(map[string]map[string]float64, len(cfg.Quotas))
@@ -91,8 +95,20 @@ func seedFromConfig(cfg *PolicyConfig) *controller.StoredPolicy {
 		Budgets:      budgets,
 		Profiles:     cloneProfiles(cfg.Profiles),
 		Admission:    cloneAdmission(cfg.Admission),
+		Environments: cloneEnvironments(cfg.Environments),
 		FromFileSeed: true,
 	}
+}
+
+// cloneEnvironments copies the seed's environment catalog the way
+// cloneProfiles copies its profile catalog.
+func cloneEnvironments(in []core.Environment) []core.Environment {
+	if in == nil {
+		return nil
+	}
+	out := make([]core.Environment, len(in))
+	copy(out, in)
+	return out
 }
 
 func cloneProfiles(in []core.Profile) []core.Profile {
@@ -134,11 +150,12 @@ func configFromStored(p *controller.StoredPolicy) PolicyConfig {
 		prices = policy.PriceSheet(p.Prices)
 	}
 	return PolicyConfig{
-		Prices:    prices,
-		Quotas:    quotas,
-		Budgets:   budgets,
-		Profiles:  cloneProfiles(p.Profiles),
-		Admission: cloneAdmission(p.Admission),
+		Prices:       prices,
+		Quotas:       quotas,
+		Budgets:      budgets,
+		Profiles:     cloneProfiles(p.Profiles),
+		Admission:    cloneAdmission(p.Admission),
+		Environments: cloneEnvironments(p.Environments),
 	}
 }
 
@@ -189,15 +206,17 @@ func policyView(p *controller.StoredPolicy, source string) PolicyView {
 	profiles := profilesToWire(p.Profiles)
 	admission := admissionToWire(p.Admission)
 	storage := storageToWire(p.Storage)
+	environments := environmentsToWire(p.Environments)
 	return PolicyView{
-		Prices:    prices,
-		Quotas:    quotas,
-		Budgets:   budgets,
-		Profiles:  &profiles,
-		Admission: &admission,
-		Storage:   &storage,
-		Source:    source,
-		Editable:  true,
+		Prices:       prices,
+		Quotas:       quotas,
+		Budgets:      budgets,
+		Profiles:     &profiles,
+		Admission:    &admission,
+		Storage:      &storage,
+		Environments: &environments,
+		Source:       source,
+		Editable:     true,
 	}
 }
 
@@ -370,7 +389,42 @@ func admissionRuleToWire(r core.AdmissionRule) AdmissionRule {
 	images := make([]string, len(r.AllowedImages))
 	copy(images, r.AllowedImages)
 	max := int32(r.MaxWorkers)
-	return AdmissionRule{AllowedImages: &images, MaxWorkers: &max}
+	out := AdmissionRule{AllowedImages: &images, MaxWorkers: &max}
+	if r.AllowPyExecutable {
+		out.AllowPyExecutable = &r.AllowPyExecutable
+	}
+	if r.AllowImageURI {
+		out.AllowImageUri = &r.AllowImageURI
+	}
+	if r.AllowConda {
+		out.AllowConda = &r.AllowConda
+	}
+	if r.AllowUnpinnedPackages {
+		out.AllowUnpinnedPackages = &r.AllowUnpinnedPackages
+	}
+	if r.PackageDenylist != nil {
+		v := append([]string{}, r.PackageDenylist...)
+		out.PackageDenylist = &v
+	}
+	if r.AllowedIndexHosts != nil {
+		v := append([]string{}, r.AllowedIndexHosts...)
+		out.AllowedIndexHosts = &v
+	}
+	if r.AllowedRemoteSchemes != nil {
+		v := append([]string{}, r.AllowedRemoteSchemes...)
+		out.AllowedRemoteSchemes = &v
+	}
+	if r.AllowedRemoteHosts != nil {
+		v := append([]string{}, r.AllowedRemoteHosts...)
+		out.AllowedRemoteHosts = &v
+	}
+	if r.MaxSetupTimeoutSeconds > 0 {
+		out.MaxSetupTimeoutSeconds = &r.MaxSetupTimeoutSeconds
+	}
+	if r.MaxDocumentBytes > 0 {
+		out.MaxDocumentBytes = &r.MaxDocumentBytes
+	}
+	return out
 }
 
 // admissionToWire never returns nil: the contract's map is `{}`, not
@@ -384,7 +438,10 @@ func admissionToWire(in map[string]core.AdmissionRule) map[string]AdmissionRule 
 }
 
 // admissionFromWire converts an incoming admission map and validates it:
-// non-empty project keys, non-empty image prefixes, non-negative caps.
+// non-empty project keys, non-empty image prefixes, non-negative caps. The
+// runtime-env governance knobs (#52) are copied verbatim onto the stored
+// rule — they make the #53 validator's hardcoded defaults API-editable;
+// the validator itself reads them starting with the catalog issue (#54).
 func admissionFromWire(in map[string]AdmissionRule) (map[string]core.AdmissionRule, error) {
 	out := make(map[string]core.AdmissionRule, len(in))
 	for project, w := range in {
@@ -406,6 +463,54 @@ func admissionFromWire(in map[string]AdmissionRule) (map[string]core.AdmissionRu
 				return nil, badRequest(what + "max_workers must be non-negative")
 			}
 			r.MaxWorkers = uint32(*w.MaxWorkers)
+		}
+		if w.AllowPyExecutable != nil {
+			r.AllowPyExecutable = *w.AllowPyExecutable
+		}
+		if w.AllowImageUri != nil {
+			r.AllowImageURI = *w.AllowImageUri
+		}
+		if w.AllowConda != nil {
+			r.AllowConda = *w.AllowConda
+		}
+		if w.AllowUnpinnedPackages != nil {
+			r.AllowUnpinnedPackages = *w.AllowUnpinnedPackages
+		}
+		copyList := func(field string, list *[]string, dst *[]string) error {
+			if list == nil {
+				return nil
+			}
+			for _, entry := range *list {
+				if entry == "" {
+					return badRequest(what + field + " must not contain an empty entry")
+				}
+			}
+			*dst = append([]string(nil), (*list)...)
+			return nil
+		}
+		if err := copyList("package_denylist", w.PackageDenylist, &r.PackageDenylist); err != nil {
+			return nil, err
+		}
+		if err := copyList("allowed_index_hosts", w.AllowedIndexHosts, &r.AllowedIndexHosts); err != nil {
+			return nil, err
+		}
+		if err := copyList("allowed_remote_schemes", w.AllowedRemoteSchemes, &r.AllowedRemoteSchemes); err != nil {
+			return nil, err
+		}
+		if err := copyList("allowed_remote_hosts", w.AllowedRemoteHosts, &r.AllowedRemoteHosts); err != nil {
+			return nil, err
+		}
+		if w.MaxSetupTimeoutSeconds != nil {
+			if *w.MaxSetupTimeoutSeconds < 0 {
+				return nil, badRequest(what + "max_setup_timeout_seconds must be non-negative")
+			}
+			r.MaxSetupTimeoutSeconds = *w.MaxSetupTimeoutSeconds
+		}
+		if w.MaxDocumentBytes != nil {
+			if *w.MaxDocumentBytes < 0 {
+				return nil, badRequest(what + "max_document_bytes must be non-negative")
+			}
+			r.MaxDocumentBytes = *w.MaxDocumentBytes
 		}
 		out[project] = r
 	}
@@ -518,6 +623,13 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 			return nil, err
 		}
 	}
+	var environments []core.Environment
+	if body.Environments != nil {
+		var err error
+		if environments, err = environmentsFromWire(*body.Environments); err != nil {
+			return nil, err
+		}
+	}
 
 	next, err := effectivePolicy(ctx, s.Store, &s.PolicySeed)
 	if err != nil {
@@ -552,6 +664,13 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 	}
 	if body.Storage != nil {
 		next.Storage = storage
+	}
+	// Environments (#52) follow the same section-replace rule as profiles,
+	// admission and storage: a present key replaces the whole catalog (`[]`
+	// clears it), an absent key leaves it untouched. References already
+	// admitted onto specs are never retroactive, exactly like storage.
+	if body.Environments != nil {
+		next.Environments = environments
 	}
 	// A profile's storage must name entries of the catalog it will be
 	// resolved against, whichever section this request replaced: a

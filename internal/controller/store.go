@@ -539,6 +539,9 @@ type StoredPolicy struct {
 	// Storage is the private-storage catalog (requirement 12): Secret
 	// references a spec may name. Empty = no catalog.
 	Storage []core.StorageEntry `json:"storage"`
+	// Environments is the environment catalog (#52): named governed
+	// environments a spec may refer to. Empty = no catalog.
+	Environments []core.Environment `json:"environments"`
 }
 
 // storedPolicyAlias breaks the recursion MarshalJSON would otherwise cause
@@ -546,7 +549,7 @@ type StoredPolicy struct {
 type storedPolicyAlias StoredPolicy
 
 // MarshalJSON substitutes empty maps for nil Quotas/Budgets/Admission and
-// empty slices for nil Profiles/Storage, mirroring Rust's
+// empty slices for nil Profiles/Storage/Environments, mirroring Rust's
 // BTreeMap::default() / Vec::default() (via #[serde(default)]), which
 // serde always writes as `{}`/`[]`, never `null`. Prices stays nullable
 // (Option<...>) — a true "no price sheet" is meaningfully distinct from an
@@ -567,6 +570,9 @@ func (p StoredPolicy) MarshalJSON() ([]byte, error) {
 	}
 	if a.Storage == nil {
 		a.Storage = []core.StorageEntry{}
+	}
+	if a.Environments == nil {
+		a.Environments = []core.Environment{}
 	}
 	return json.Marshal(a)
 }
