@@ -129,7 +129,10 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 	if spec.Environment != nil {
 		r, rerr := s.resolveEnvironment(ctx, view.Project, *spec.Environment, &view.Image)
 		if rerr != nil {
-			return "environment_rejected", rerr
+			// environmentAuditReason: the scan gate's refusals (#58) audit
+			// under their own reasons; everything else is
+			// environment_rejected.
+			return environmentAuditReason(rerr), rerr
 		}
 		envResolved = r
 		spec.RuntimeEnvYaml = r.RuntimeEnvYaml

@@ -10,8 +10,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -253,6 +255,13 @@ type environmentLifecycleEvent struct {
 // published_at; one that still lacks both after the fill is a 400 naming
 // the entry (reachable only from an unauthenticated dev-mode edit or a
 // seeded published entry echoed back without its metadata).
+//
+// Independent of the lifecycle move, a scan verdict attests the exact
+// packages and base image it scanned (#58): an edit that changes either
+// drops the stored verdict (absent = unscanned), so a changed environment
+// meets the scan gate's refusal rather than riding a stale "clean".
+// Verdicts on entries whose scanned content is untouched ride forward
+// unchanged.
 func applyEnvironmentTransitions(old, incoming []core.Environment, publisher *string, now time.Time) ([]core.Environment, []environmentLifecycleEvent, error) {
 	byName := make(map[string]*core.Environment, len(old))
 	for i := range old {
@@ -317,6 +326,13 @@ func applyEnvironmentTransitions(old, incoming []core.Environment, publisher *st
 			if e.PublishedBy == nil || e.PublishedAt == nil {
 				return nil, nil, badRequest(fmt.Sprintf("invalid environment %q: a published environment must carry published_by and published_at", e.Name))
 			}
+		}
+		// #58: a verdict attests the exact content it scanned; an edit
+		// changing the packages or the base image invalidates it. Drop the
+		// verdict (absent = unscanned) rather than letting a stale "clean"
+		// ride onto content it never saw.
+		if prev != nil && (prev.BaseImage != e.BaseImage || !slices.Equal(prev.Packages, e.Packages)) {
+			e.Scan = nil
 		}
 		out[i] = e
 	}
@@ -403,13 +419,65 @@ func compileEnvironment(e *core.Environment) (string, error) {
 	return string(out), nil
 }
 
+// environmentRefusal is a resolveEnvironment 400 carrying the audit reason
+// the caller's deny row records (#58): the scan gate's refusals are
+// distinguishable in the audit trail from the catalog's other environment
+// refusals (which all record environment_rejected). Unwrap exposes the
+// underlying HTTPError so the error-to-status mapping is unchanged.
+type environmentRefusal struct {
+	reason string
+	err    error
+}
+
+func (e *environmentRefusal) Error() string { return e.err.Error() }
+func (e *environmentRefusal) Unwrap() error { return e.err }
+
+// environmentAuditReason is the audit-row reason for an error
+// resolveEnvironment returned: the scan gate's own reason, or
+// environment_rejected for every other environment refusal (unknown name,
+// foreign project, draft/deprecated, image conflict, ungoverned compile).
+func environmentAuditReason(err error) string {
+	var ref *environmentRefusal
+	if errors.As(err, &ref) {
+		return ref.reason
+	}
+	return "environment_rejected"
+}
+
+// requireScannedEnvironmentsFor reports whether the scan gate (#58) is on
+// for project: the "*" admission rule's require_scanned_environments, or
+// the project's own rule setting it — admissionFor's inheritance applied
+// to a boolean toggle, so like the runtime-env permit toggles a project
+// rule can only turn the gate on, never un-set a "*" gate. Reads the
+// effective policy, so a PUT applies to the next admission.
+func (s *Server) requireScannedEnvironmentsFor(ctx context.Context, project string) (bool, error) {
+	p, err := effectivePolicy(ctx, s.Store, &s.PolicySeed)
+	if err != nil {
+		return false, err
+	}
+	if p == nil {
+		return false, nil
+	}
+	for _, key := range []string{AdmissionEveryProject, project} {
+		if rule, ok := p.Admission[key]; ok && rule.RequireScannedEnvironments {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // resolveEnvironment resolves name against the effective policy's
 // environment catalog for project (#55), mirroring resolveStorage: an
 // unknown name, an entry the project may not use, or an entry that is not
 // published (a draft is not selectable yet; a deprecated one stays
 // resolvable for already-admitted specs but takes no new references) is a
-// 400, never a workload that silently runs without its environment. The
-// environment's base image fills *image the way a profile's image fills the
+// 400, never a workload that silently runs without its environment. When
+// the caller's project requires scanned environments (#58,
+// require_scanned_environments), an entry without a clean recorded scan
+// verdict is refused the same way — with its own audit reason
+// (environment_unscanned / environment_scan_failed, carried on the
+// environmentRefusal; every other refusal here audits as
+// environment_rejected). The environment's base image fills *image the way a profile's image fills the
 // shape (plan ruling D4): an empty *image takes it, a differing one is the
 // whole-or-nothing conflict 400; the admission image allowlist then applies
 // to it as to any spec image. The compiled runtime_env passes the same
@@ -442,6 +510,25 @@ func (s *Server) resolveEnvironment(ctx context.Context, project, name string, i
 		return nil, badRequest(fmt.Sprintf("environment %q is a draft; only published environments can be referenced", name))
 	default:
 		return nil, badRequest(fmt.Sprintf("environment %q is deprecated; stored resolutions keep working but new references are refused", name))
+	}
+	// Scan gate (#58): when the caller's project requires scanned
+	// environments, the catalog entry must carry a clean recorded verdict.
+	// A verdict the control plane never saw scanned (absent or pending —
+	// both indistinguishable from "not yet vetted") is refused as
+	// environment_unscanned; a recorded failure as environment_scan_failed.
+	// The verdict is only a recorded field: the gate enforces that an
+	// administrator attested the exact content, it does not scan itself.
+	if required, gerr := s.requireScannedEnvironmentsFor(ctx, project); gerr != nil {
+		return nil, wrapStoreErr(gerr)
+	} else if required {
+		switch {
+		case env.Scan == nil || env.Scan.Status == core.EnvironmentScanPending:
+			return nil, &environmentRefusal{reason: "environment_unscanned", err: badRequest(fmt.Sprintf(
+				"environment %q carries no clean scan verdict and project %q requires scanned environments; run the offline scan workflow (scripts/scan-environment.py) and record the verdict", name, project))}
+		case env.Scan.Status == core.EnvironmentScanFailed:
+			return nil, &environmentRefusal{reason: "environment_scan_failed", err: badRequest(fmt.Sprintf(
+				"environment %q is recorded as scan-failed and project %q requires scanned environments; fix the flagged content and record a fresh verdict", name, project))}
+		}
 	}
 	if env.BaseImage != "" {
 		switch {

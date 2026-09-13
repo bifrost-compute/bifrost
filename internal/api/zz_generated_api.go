@@ -288,6 +288,9 @@ type AdmissionRule struct {
 
 	// PackageDenylist PyPI-normalized package names (PEP 503) that must never install, pinned or not (#53).
 	PackageDenylist *[]string `json:"package_denylist,omitempty"`
+
+	// RequireScannedEnvironments Require every environment a spec references to carry a clean recorded scan verdict (#58): a reference to an environment whose `scan` is absent, pending or failed is refused (400); false = any published environment is referenceable.
+	RequireScannedEnvironments *bool `json:"require_scanned_environments,omitempty"`
 }
 
 // AllocationSpec A project's allocation within a pool (translates to a Kueue LocalQueue).

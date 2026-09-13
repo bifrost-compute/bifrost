@@ -292,6 +292,107 @@ func TestUnpublishedOrForeignEnvironmentIsRefused(t *testing.T) {
 	}
 }
 
+// TestScanGateRefusesUncleanVerdicts covers the CVE/scan gate (#58): with
+// the project's admission rule requiring scanned environments, a reference
+// to a published environment whose recorded verdict is absent or failed is
+// a 400 that persists nothing and audits under the gate's own reasons; a
+// clean verdict is admitted. The verdict is a recorded field — the control
+// plane does not scan; an administrator sets it after the offline workflow
+// (scripts/scan-environment.py).
+func TestScanGateRefusesUncleanVerdicts(t *testing.T) {
+	tgt := target.Get(t)
+	req.Covers(t, 19, "with require_scanned_environments on, a reference to an environment whose scan verdict is absent or failed is refused (400, environment_unscanned/environment_scan_failed audit denies); a clean verdict is admitted")
+	ctx := context.Background()
+	admin := tgt.As("admin").API()
+	image := fixture.RayImage()
+	published := client.Published
+	failed := client.EnvironmentScanStatus("failed")
+	clean := client.EnvironmentScanStatus("clean")
+	scanner := "trivy 0.57.0"
+	setEnvironments(t, tgt, []client.EnvironmentSpec{
+		{Name: req.Name("unscanned"), BaseImage: &image, Packages: &[]string{"numpy==1.26.4"}, Status: &published},
+		{Name: req.Name("vuln"), BaseImage: &image, Packages: &[]string{"numpy==1.26.4"}, Status: &published,
+			Scan: &client.EnvironmentScan{Status: failed, Scanner: &scanner}},
+		{Name: req.Name("vetted"), BaseImage: &image, Packages: &[]string{"numpy==1.26.4"}, Status: &published,
+			Scan: &client.EnvironmentScan{Status: clean, Scanner: &scanner}},
+	})
+
+	// Turn the gate on for every project ("*" rule), restoring the admission
+	// section when the test ends (the policy is platform state).
+	before, err := admin.GetPolicyWithResponse(ctx)
+	if err != nil || before.JSON200 == nil {
+		t.Fatalf("get_policy: err=%v status=%v body=%s", err, before.StatusCode(), before.Body)
+	}
+	on := true
+	adm := map[string]client.AdmissionRule{"*": {RequireScannedEnvironments: &on}}
+	put, err := admin.UpdatePolicyWithResponse(ctx, client.UpdatePolicyJSONRequestBody{Admission: &adm})
+	if err != nil || put.StatusCode()/100 != 2 {
+		t.Fatalf("update_policy admission: err=%v status=%v body=%s", err, put.StatusCode(), put.Body)
+	}
+	t.Cleanup(func() {
+		restore := map[string]client.AdmissionRule{}
+		if before.JSON200.Admission != nil {
+			restore = *before.JSON200.Admission
+		}
+		_, _ = admin.UpdatePolicyWithResponse(context.Background(), client.UpdatePolicyJSONRequestBody{Admission: &restore})
+	})
+
+	devA := fixture.Subject(t, tgt, "dev-a")
+	for i, name := range []string{req.Name("unscanned"), req.Name("vuln")} {
+		id := req.Name(fmt.Sprintf("scandeny%d", i))
+		body := fixture.SubmitJobBody(id, "team-a", `python -c 1`, quickTTL())
+		body.Spec.Environment = &name
+		st, respBody := fixture.SubmitJob(t, tgt, "dev-a", body)
+		if st != http.StatusBadRequest {
+			t.Fatalf("submit naming %s = %d %s, want 400", name, st, respBody)
+		}
+		if g, gerr := admin.GetJobWithResponse(ctx, id); gerr != nil || g.StatusCode() != http.StatusNotFound {
+			t.Fatalf("a refused submit must persist nothing; get_job %s = %v", id, statusCodeOf(g, gerr))
+		}
+	}
+
+	// A clean verdict is admitted.
+	okID := req.Name("scanok")
+	okBody := fixture.SubmitJobBody(okID, "team-a", `python -c "print('REQ-SCAN-OK')"`, quickTTL())
+	okBody.Spec.Image = ""
+	okBody.Spec.Environment = ptrString(req.Name("vetted"))
+	fixture.MustSubmitJob(t, tgt, "dev-a", okBody)
+
+	// The refusals audit under the gate's own reasons, distinct from the
+	// catalog's environment_rejected.
+	audit, err := admin.ListAuditEventsWithResponse(ctx, nil)
+	if err != nil || audit.StatusCode() != http.StatusOK {
+		t.Fatalf("list_audit_events: err=%v status=%v", err, audit.StatusCode())
+	}
+	var rows []struct {
+		Subject  *string `json:"subject"`
+		Decision string  `json:"decision"`
+		Reason   *string `json:"reason"`
+	}
+	if err := json.Unmarshal(audit.Body, &struct {
+		Items *[]struct {
+			Subject  *string `json:"subject"`
+			Decision string  `json:"decision"`
+			Reason   *string `json:"reason"`
+		} `json:"items"`
+	}{Items: &rows}); err != nil {
+		t.Fatalf("list_audit_events: unmarshal: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if r.Decision == "deny" && r.Subject != nil && *r.Subject == devA && r.Reason != nil {
+			seen[*r.Reason] = true
+		}
+	}
+	for _, reason := range []string{"environment_unscanned", "environment_scan_failed"} {
+		if !seen[reason] {
+			t.Errorf("audit trail lacks a %s deny for %s", reason, devA)
+		}
+	}
+}
+
+func ptrString(s string) *string { return &s }
+
 func statusCodeOf(r *client.GetJobHTTPResponse, err error) any {
 	if err != nil {
 		return err

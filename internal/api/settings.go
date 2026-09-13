@@ -425,6 +425,9 @@ func admissionRuleToWire(r core.AdmissionRule) AdmissionRule {
 	if r.MaxDocumentBytes > 0 {
 		out.MaxDocumentBytes = &r.MaxDocumentBytes
 	}
+	if r.RequireScannedEnvironments {
+		out.RequireScannedEnvironments = &r.RequireScannedEnvironments
+	}
 	return out
 }
 
@@ -442,7 +445,9 @@ func admissionToWire(in map[string]core.AdmissionRule) map[string]AdmissionRule 
 // non-empty project keys, non-empty image prefixes, non-negative caps. The
 // runtime-env governance knobs (#52) are copied verbatim onto the stored
 // rule — they make the #53 validator's hardcoded defaults API-editable;
-// the validator reads them through runtimeEnvPolicyFor (#55).
+// the validator reads them through runtimeEnvPolicyFor (#55). The scan-gate
+// toggle (#58) rides the same way; environment resolution reads it through
+// requireScannedEnvironmentsFor.
 func admissionFromWire(in map[string]AdmissionRule) (map[string]core.AdmissionRule, error) {
 	out := make(map[string]core.AdmissionRule, len(in))
 	for project, w := range in {
@@ -512,6 +517,9 @@ func admissionFromWire(in map[string]AdmissionRule) (map[string]core.AdmissionRu
 				return nil, badRequest(what + "max_document_bytes must be non-negative")
 			}
 			r.MaxDocumentBytes = *w.MaxDocumentBytes
+		}
+		if w.RequireScannedEnvironments != nil {
+			r.RequireScannedEnvironments = *w.RequireScannedEnvironments
 		}
 		out[project] = r
 	}

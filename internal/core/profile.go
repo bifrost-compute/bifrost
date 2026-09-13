@@ -304,6 +304,15 @@ type AdmissionRule struct {
 	// MaxDocumentBytes caps the raw runtime_env_yaml document size; 0 =
 	// the platform default.
 	MaxDocumentBytes int64 `json:"max_document_bytes,omitempty"`
+
+	// RequireScannedEnvironments (#58) refuses every environment reference
+	// in the project whose catalog entry carries no clean recorded scan
+	// verdict: an absent (never scanned), pending or failed `scan` is a
+	// 400 at admission. The verdict is a recorded field — the control
+	// plane does not scan itself; an administrator sets it after running
+	// the offline scan workflow (scripts/scan-environment.py). Default
+	// off: any published environment is referenceable.
+	RequireScannedEnvironments bool `json:"require_scanned_environments,omitempty"`
 }
 
 // admissionRuleAlias breaks the recursion MarshalJSON would otherwise

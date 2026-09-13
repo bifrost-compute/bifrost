@@ -267,6 +267,42 @@ and PATCHes the verdict.
 
 Depends on: 3, 4. Can land after MVP (rule defaults off).
 
+*Landed (#58, 2026-09-13).* The gate is a per-project AdmissionRule knob,
+`require_scanned_environments` (`internal/api/openapi.json`,
+`core.AdmissionRule`), not a global policy flag — the epic's "under
+admission" read as the admission map, so the platform-wide `"*"` rule and a
+project's own rule inherit exactly like the other admission knobs (a
+project rule can only turn the gate on, never un-set a `"*"` gate — the
+boolean carries no set/unset distinction once stored). The verdict stays a
+recorded field an admin sets after an offline scan; the control plane does
+not scan.
+
+Enforcement is in `resolveEnvironment` (`internal/api/environments.go`), so
+jobs and clusters share it. With the gate on, a published environment whose
+`scan` is absent or pending is refused 400 with audit reason
+`environment_unscanned`; a `failed` verdict with `environment_scan_failed`
+— both carried on the new `environmentRefusal` type so the gate's refusals
+are distinguishable in the audit trail from the catalog's other
+`environment_rejected` denies. Verdict-echoes-in-audit: the refusal rows
+suffice, same ruling as #57 — `core.AuditEvent`'s field set is fixed, so
+the verdict content (scanner, scanned_at) lives on the catalog entry and
+the pinned spec, not on the deny row, which names actor, workload, reason
+and time.
+
+Verdict hygiene: a verdict attests the exact packages and base image it
+scanned, so `applyEnvironmentTransitions` drops a stored `scan` whenever an
+edit changes either (absent = unscanned — a changed environment meets the
+gate's refusal, never a stale "clean"); edits touching anything else keep
+the verdict.
+
+Offline workflow: `scripts/scan-environment.py <policy.json> <name>`
+runs trivy (HIGH/CRITICAL) on the base image and pip-audit on the pinned
+packages, and emits the JSON fragment to paste into the entry's `scan`
+field (or `--write` edits the document in place); there is no PATCH path —
+applying the verdict is the ordinary admin-only `PUT /settings/policy`
+section-replace (GET the policy, edit, PUT it back). The deferred CronJob
+that scans and PATCHes stays deferred.
+
 ### Issue 8 — Console affordances (bifrost-ui; interface spec only)
 
 As a console user, I want an environment picker and a guided builder (base
