@@ -8,7 +8,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - uses: golangci/golangci-lint-action@v8
@@ -30,7 +30,7 @@ jobs:
     env:
       BIFROST_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - name: api + client codegen drift (ADR-0002 spec-first contract)
@@ -46,7 +46,7 @@ jobs:
   vuln:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
@@ -67,7 +67,7 @@ jobs:
     # ephemeral runner's disk, never surfaced to anyone looking at the run.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - name: L2 requirement suite
@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: go run go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260808063849-8649a03c818a ./... || true

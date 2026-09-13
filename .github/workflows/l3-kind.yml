@@ -61,7 +61,7 @@ jobs:
       BIFROST_URL: http://127.0.0.1:8484
       BIFROST_ADMIN_PASSWORD: kind-l3-admin-0123456789   # test/requirements/target/cluster/kind/manifests.yaml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
 
@@ -180,7 +180,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - uses: actions/download-artifact@v4

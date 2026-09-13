@@ -33,7 +33,7 @@ jobs:
       # Bump both together.
       GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history: the point of the lane is secrets in past commits.
           fetch-depth: 0

@@ -33,7 +33,7 @@ jobs:
         ray: ["ray[default]==2.57.0", "ray[default]==2.56.1"]
         token_auth: ["off", "on"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Generate the token-auth leg's shared token
         # A fresh random token per run (secrets.token_hex(32) shape — same
