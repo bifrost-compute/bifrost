@@ -47,6 +47,12 @@ func (j *JobClient) ApplyJob(ctx context.Context, id core.ClusterId, spec *core.
 	if err := j.ensureClusterAllow(ctx, string(id), spec.Owner); err != nil {
 		return err
 	}
+	// Package installs under default-deny egress (issue #56): a job whose
+	// admitted runtime env installs packages gets the package-proxy
+	// allowance for its cluster's pods; every other job gets none.
+	if err := j.ensurePackageProxyEgress(ctx, string(id), spec.RuntimeEnvYaml); err != nil {
+		return err
+	}
 	manifest, err := provision.RayJobForScheduled(id, spec, generation, queue, j.scheduling)
 	if err != nil {
 		return provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: err.Error()}

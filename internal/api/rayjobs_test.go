@@ -621,8 +621,9 @@ func TestSubmitJobGovernsRuntimeEnvYaml(t *testing.T) {
 
 	// A governed document (pinned pip, env_vars, capped timeout, local
 	// working_dir) is admitted and rides the stored spec verbatim, exactly
-	// as the passthrough carried it before — governance validates, it does
-	// not rewrite.
+	// as the passthrough carried it before — governance validates, and
+	// (#56) only fills the setup timeout a document leaves unset, which
+	// this one pins itself.
 	legal := "pip: [torch==2.1.0]\nenv_vars:\n  OMP_NUM_THREADS: \"4\"\nconfig:\n  setup_timeout_seconds: 300\nworking_dir: ./src"
 	if err := submitWithEnv("job-ok", legal); err != nil {
 		t.Fatalf("governed-legal env refused: %v", err)
@@ -630,6 +631,43 @@ func TestSubmitJobGovernsRuntimeEnvYaml(t *testing.T) {
 	stored, _ := store.GetRayJob(ctx, "job-ok")
 	if stored == nil || stored.Spec.RuntimeEnvYaml != legal {
 		t.Fatalf("stored env = %q, want the submitted document verbatim", stored.Spec.RuntimeEnvYaml)
+	}
+}
+
+// Bounded setup timeout (#56): a governed document without
+// config.setup_timeout_seconds is stored with the policy default injected —
+// the bound rides the RayJob CR, so a wedged install fails at the timeout
+// instead of hanging forever. A document that pins its own timeout is
+// stored verbatim.
+func TestSubmitJobInjectsBoundedSetupTimeout(t *testing.T) {
+	store := newMemStore(t)
+	s := &Server{Store: store}
+	admin := testIdentity("admin", auth.RoleAdmin)
+	ctx := context.Background()
+
+	submitWithEnv := func(jobID, env string) {
+		body := jobBodyFor("team-a")
+		body.Id = strPtr(jobID)
+		body.Spec.RuntimeEnvYaml = &env
+		if _, err := s.SubmitJob(ctxWithIdentity(admin), SubmitJobRequestObject{Body: &body}); err != nil {
+			t.Fatalf("submit %s: %v", jobID, err)
+		}
+	}
+
+	submitWithEnv("job-notimeout", "pip: [numpy==1.26.4]")
+	stored, _ := store.GetRayJob(ctx, "job-notimeout")
+	if stored == nil {
+		t.Fatal("job not persisted")
+	}
+	if secs, set := setupTimeoutOf(t, stored.Spec.RuntimeEnvYaml); !set || secs != DefaultSetupTimeoutSeconds {
+		t.Fatalf("stored env setup timeout = %d (set %v), want the injected %d:\n%s", secs, set, DefaultSetupTimeoutSeconds, stored.Spec.RuntimeEnvYaml)
+	}
+
+	pinned := "pip: [numpy==1.26.4]\nconfig:\n  setup_timeout_seconds: 300"
+	submitWithEnv("job-pinned", pinned)
+	stored, _ = store.GetRayJob(ctx, "job-pinned")
+	if stored == nil || stored.Spec.RuntimeEnvYaml != pinned {
+		t.Fatalf("stored env = %q, want the caller's pinned timeout verbatim", stored.Spec.RuntimeEnvYaml)
 	}
 }
 

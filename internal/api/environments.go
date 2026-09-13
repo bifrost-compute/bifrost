@@ -349,6 +349,12 @@ func (s *Server) resolveEnvironment(ctx context.Context, project, name string, i
 		if verr := pol.Validate(compiled); verr != nil {
 			return nil, badRequest(fmt.Sprintf("environment %q compiles to a runtime_env the platform rule set refuses: %v", name, verr))
 		}
+		// #56: the pinned resolution carries the bounded setup timeout too —
+		// a cluster's pinned default and a job's compiled document both.
+		compiled, err = pol.EnforceSetupTimeout(compiled)
+		if err != nil {
+			return nil, badRequest(err.Error())
+		}
 	}
 	at := time.Unix(int64(controller.NowUnix()), 0).UTC()
 	return &core.ResolvedEnvironment{

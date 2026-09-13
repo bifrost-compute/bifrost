@@ -399,6 +399,26 @@
       "skip_reasons": [
         "target inproc has no Kubernetes"
       ]
+    },
+    {
+      "n": 19,
+      "title": "Jobs run with governed, named environments (packages install at start, bounded, cached)",
+      "priority": "HIGH",
+      "tests": 4,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 1,
+      "not_yet_built": 0,
+      "status": "partial",
+      "test_names": [
+        "TestEnvironmentInstallFailureSurfacesUsefulMessage",
+        "TestEnvironmentPackagesImportAtJobStart",
+        "TestJobNamingPublishedEnvironmentIsAdmitted",
+        "TestUnpublishedOrForeignEnvironmentIsRefused"
+      ],
+      "skip_reasons": [
+        "target inproc has no Kubernetes"
+      ]
     }
   ]
 }

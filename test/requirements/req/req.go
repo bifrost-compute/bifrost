@@ -19,7 +19,7 @@ import (
 //go:embed requirements.yaml
 var requirementsYAML []byte
 
-// Requirement is one row of the 18-row table.
+// Requirement is one row of the requirement table.
 type Requirement struct {
 	N        int    `yaml:"n"`
 	Priority string `yaml:"priority"`
@@ -31,7 +31,7 @@ var (
 	reqs     []Requirement
 )
 
-// Requirements returns the 18 rows, in order.
+// Requirements returns the table's rows, in order.
 func Requirements() []Requirement {
 	reqsOnce.Do(func() {
 		if err := yaml.Unmarshal(requirementsYAML, &reqs); err != nil {

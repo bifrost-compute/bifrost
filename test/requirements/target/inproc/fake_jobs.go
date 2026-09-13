@@ -13,8 +13,10 @@ import (
 // 5). A job walks KubeRay's deployment statuses one step per observe —
 // Initializing, then Running (with a dashboard URL, so the reconciler
 // registers it with the gateway) for runningObserves passes, then
-// Complete/SUCCEEDED — or Failed/FAILED when the entrypoint exits 1.
-// DeleteJob removes it, as deleting the RayJob does.
+// Complete/SUCCEEDED — or Failed/FAILED when the entrypoint exits 1, or
+// with a runtime-env setup failure message when its runtime env names
+// [FakeUninstallablePackage] (requirement 19). DeleteJob removes it, as
+// deleting the RayJob does.
 type fakeJobProvisioner struct {
 	mu   sync.Mutex
 	jobs map[core.ClusterId]*fakeJob
@@ -58,6 +60,22 @@ func (j *fakeJob) fails() bool {
 	return strings.Contains(j.spec.Entrypoint, "exit 1") || strings.Contains(j.spec.Entrypoint, "exit(1)")
 }
 
+// FakeUninstallablePackage is the install-failure marker (requirement 19,
+// issue #56): the one package the fake index can never serve. A job whose
+// runtime env names it dies the way a real cluster's pip failure does —
+// the runtime-env setup fails before the entrypoint runs, Ray reports the
+// job FAILED with the setup error as its message, and KubeRay marks the
+// deployment Failed. The r19 tests name this package in an environment's
+// package list; on a real cluster the same submission fails for real (the
+// package exists on no index).
+const FakeUninstallablePackage = "bifrost-uninstallable"
+
+// installFails reports whether the job's runtime env names the marker
+// package.
+func (j *fakeJob) installFails() bool {
+	return strings.Contains(j.spec.RuntimeEnvYaml, FakeUninstallablePackage)
+}
+
 func (p *fakeJobProvisioner) observed(id core.ClusterId, j *fakeJob) provision.ObservedJob {
 	cluster := fakeClusterName(id)
 	obs := provision.ObservedJob{ID: id, ClusterName: &cluster}
@@ -74,12 +92,22 @@ func (p *fakeJobProvisioner) observed(id core.ClusterId, j *fakeJob) provision.O
 	default:
 		start, end := uint64(1_700_000_000), uint64(1_700_000_030)
 		obs.StartTime, obs.EndTime = &start, &end
-		if j.fails() {
+		switch {
+		case j.installFails():
+			// The fake index never serves the marker package: the
+			// runtime-env setup fails before the entrypoint runs, and the
+			// message Ray would write names the setup failure and the
+			// package (requirement 19: the job's message must say WHY).
+			obs.DeploymentStatus = provision.JobFailedDeploymentStatus
+			obs.JobStatus = "FAILED"
+			msg := "runtime_env setup failed: Failed to install pip packages: ERROR: No matching distribution found for " + FakeUninstallablePackage
+			obs.Message = &msg
+		case j.fails():
 			obs.DeploymentStatus = provision.JobFailedDeploymentStatus
 			obs.JobStatus = "FAILED"
 			msg := "Job failed: entrypoint exited with status 1"
 			obs.Message = &msg
-		} else {
+		default:
 			obs.DeploymentStatus = provision.JobCompleteDeploymentStatus
 			obs.JobStatus = "SUCCEEDED"
 		}

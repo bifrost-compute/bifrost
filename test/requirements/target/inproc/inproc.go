@@ -277,6 +277,22 @@ func (tg *target) API() *client.ClientWithResponses {
 	return c
 }
 
+// JobRuntimeEnv returns the runtime_env_yaml the named job was admitted
+// with — the stored spec's (possibly environment-compiled, timeout-bounded)
+// document, which the fake provisioner carries verbatim into the fake
+// RayJob. found=false when no such job exists. Requirement tests read the
+// admitted document through this seam because the contract deliberately
+// never echoes a job's spec (guards rule 1 keeps internal/ out of the test
+// packages); a cluster target answers the same question by reading the
+// RayJob CR's runtimeEnvYAML.
+func (tg *target) JobRuntimeEnv(id string) (string, bool) {
+	j, err := tg.store.GetRayJob(context.Background(), core.ClusterId(id))
+	if err != nil || j == nil {
+		return "", false
+	}
+	return j.Spec.RuntimeEnvYaml, true
+}
+
 // Cleanup deletes every cluster and service whose name carries the run
 // prefix, as admin.
 func (tg *target) Cleanup(ctx context.Context) error {

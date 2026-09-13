@@ -1,4 +1,5 @@
-# The 18 rows of the Ray Software Pack requirement table (docs/SPEC.md).
+# The Ray Software Pack requirement table (docs/SPEC.md): rows 1-18, plus
+# row 19 (governed environments, epic 2026-09-12-governed-environments).
 # req.Covers validates against this; reqreport renders from it. One source.
 - {n: 1,  priority: CRITICAL, title: "Deploy models from within Jupyter"}
 - {n: 2,  priority: HIGH,     title: "Groups share models privately"}
@@ -18,3 +19,4 @@
 - {n: 16, priority: LOW,      title: "Same UX across Ray and Dask"}
 - {n: 17, priority: LOW,      title: "Same UX across Kubernetes and Slurm (design must not foreclose)"}
 - {n: 18, priority: LOW,      title: "NIST security baseline operation + audit evidence"}
+- {n: 19, priority: HIGH,     title: "Jobs run with governed, named environments (packages install at start, bounded, cached)"}

@@ -27,8 +27,8 @@ import (
 // RuntimeEnvPolicy is the governance rule set applied to a submitted
 // runtime_env_yaml. The zero value is the governed default: the five-field
 // allowlist, pinned packages only, no index redirection, local uploads
-// only, setup_timeout capped at DefaultSetupTimeoutSeconds, documents
-// capped at DefaultMaxDocumentBytes.
+// only, setup_timeout capped at DefaultSetupTimeoutSeconds (and injected
+// when unset, #56), documents capped at DefaultMaxDocumentBytes.
 type RuntimeEnvPolicy struct {
 	// AllowPyExecutable permits the py_executable field (an arbitrary
 	// interpreter the platform cannot attest). Default deny.
@@ -209,6 +209,55 @@ func (p RuntimeEnvPolicy) Validate(raw string) error {
 		}
 	}
 	return nil
+}
+
+// setupTimeoutDefault is the config.setup_timeout_seconds
+// EnforceSetupTimeout injects when a document sets none (#56):
+// DefaultSetupTimeoutSeconds, lowered to the policy cap when the cap is
+// tighter, so the injected bound never exceeds what Validate would admit.
+func (p RuntimeEnvPolicy) setupTimeoutDefault() int64 {
+	capSecs := p.MaxSetupTimeoutSeconds
+	if capSecs <= 0 || capSecs > DefaultSetupTimeoutSeconds {
+		capSecs = DefaultSetupTimeoutSeconds
+	}
+	return capSecs
+}
+
+// EnforceSetupTimeout returns raw with a bounded setup timeout (#56): a
+// document carrying a runtime env but no config.setup_timeout_seconds gets
+// the policy default injected, so a wedged install fails at the bound
+// instead of hanging on Ray's mercy. A document that sets the timeout
+// already (validated against the cap by checkConfig) is returned
+// byte-identical — governance bounds, it does not rewrite what the caller
+// pinned. An empty document carries no runtime env and is returned
+// unchanged. Call after Validate; a parse failure here is therefore
+// unreachable in the admission flow but still reported.
+func (p RuntimeEnvPolicy) EnforceSetupTimeout(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return raw, nil
+	}
+	var doc map[string]interface{}
+	if err := yaml.NewDecoder(strings.NewReader(raw)).Decode(&doc); err != nil {
+		return "", fmt.Errorf("runtime_env_yaml is not a valid YAML mapping: %v", err)
+	}
+	if len(doc) == 0 {
+		return raw, nil
+	}
+	cfg, _ := doc["config"].(map[string]interface{})
+	if cfg != nil {
+		if _, set := cfg["setup_timeout_seconds"]; set {
+			return raw, nil
+		}
+	} else {
+		cfg = map[string]interface{}{}
+	}
+	cfg["setup_timeout_seconds"] = p.setupTimeoutDefault()
+	doc["config"] = cfg
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("runtime_env_yaml does not re-render: %v", err)
+	}
+	return string(out), nil
 }
 
 func (p RuntimeEnvPolicy) deniedFieldEnabled(field string) bool {
