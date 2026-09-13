@@ -49,6 +49,7 @@ jobs:
 
       # `git` mode walks history; --redact keeps the secret itself out of the
       # log so a leaked value does not get a second leak into the Actions UI.
-      # Exit code is 1 on findings, which is the gate.
+      # Exit code is 1 on findings, which is the gate. The repo-root config
+      # allowlists known fixtures only — see .gitleaks.toml.
       - name: Scan history for secrets
-        run: ./gitleaks git --redact --verbose .
+        run: ./gitleaks git --redact --verbose --config .gitleaks.toml .

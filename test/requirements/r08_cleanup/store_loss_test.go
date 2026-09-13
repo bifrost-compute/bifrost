@@ -27,6 +27,7 @@ import (
 	"time"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -59,11 +60,30 @@ func TestStoreLossWhileClusterExists(t *testing.T) {
 	}
 	// However the drill ends, the backing RayCluster is this run's to
 	// remove: after the wipe the store has no record of it, so the target's
-	// own cleanup — which deletes through the API — cannot reach it.
+	// own cleanup — which deletes through the API — cannot reach it. The
+	// per-cluster NetworkPolicies need the same treatment: they are reaped
+	// by the control plane's tombstone sweep, which the wiped store will
+	// never run for this cluster, and postflight's leak check flags them.
 	t.Cleanup(func() {
 		var cur rayv1.RayCluster
 		if err := k.Get(ctx, key(id), &cur); err == nil {
 			_ = k.Delete(ctx, &cur)
+		}
+		// Label string kept in sync with provision.ClusterIDLabel by hand —
+		// requirement packages must not import internal/.
+		byCluster := ctrlclient.MatchingLabels{"bifrost.dev/cluster-id": id}
+		var nps networkingv1.NetworkPolicyList
+		if err := k.List(ctx, &nps, ctrlclient.InNamespace(tgt.Namespace()), byCluster); err == nil {
+			for i := range nps.Items {
+				_ = k.Delete(ctx, &nps.Items[i])
+			}
+			_ = wait.PollUntilContextTimeout(ctx, 2*time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
+				var left networkingv1.NetworkPolicyList
+				if err := k.List(ctx, &left, ctrlclient.InNamespace(tgt.Namespace()), byCluster); err != nil {
+					return false, err
+				}
+				return len(left.Items) == 0, nil
+			})
 		}
 	})
 
