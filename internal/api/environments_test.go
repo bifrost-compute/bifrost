@@ -162,14 +162,39 @@ func TestUpdatePolicyEnvironmentsSection(t *testing.T) {
 		"bad name":      {{Name: badName}},
 		"unpinned pkg":  {func() EnvironmentSpec { e := good; e.Name = "u"; e.Packages = &unpinned; return e }()},
 		"empty project": {func() EnvironmentSpec { e := good; e.Name = "e"; pr := []string{""}; e.Projects = &pr; return e }()},
-		"empty var":     {func() EnvironmentSpec { e := good; e.Name = "v"; v := map[string]string{"": "x"}; e.EnvVars = &v; return e }()},
-		"bad status":    {func() EnvironmentSpec { e := good; e.Name = "s"; e.Status = &bogus; return e }()},
-		"bad scan":      {func() EnvironmentSpec { e := good; e.Name = "c"; e.Scan = &EnvironmentScan{Status: bogusScan}; return e }()},
+		"empty var": {func() EnvironmentSpec {
+			e := good
+			e.Name = "v"
+			v := map[string]string{"": "x"}
+			e.EnvVars = &v
+			return e
+		}()},
+		"bad status": {func() EnvironmentSpec { e := good; e.Name = "s"; e.Status = &bogus; return e }()},
+		"bad scan": {func() EnvironmentSpec {
+			e := good
+			e.Name = "c"
+			e.Scan = &EnvironmentScan{Status: bogusScan}
+			return e
+		}()},
 		"ungoverned yaml": {func() EnvironmentSpec {
 			e := good
 			e.Name = "y"
 			e.Status = &draft
 			e.RuntimeEnvYaml = strPtr("conda: {}")
+			return e
+		}()},
+		// The escape hatch and the structured fields fixing the same thing
+		// is refused at the edit, not merged arbitrarily at resolution.
+		"pip overlap": {func() EnvironmentSpec {
+			e := good
+			e.Name = "p"
+			e.RuntimeEnvYaml = strPtr("pip: [requests==2.31.0]")
+			return e
+		}()},
+		"env overlap": {func() EnvironmentSpec {
+			e := good
+			e.Name = "o"
+			e.RuntimeEnvYaml = strPtr("env_vars:\n  OMP_NUM_THREADS: \"8\"")
 			return e
 		}()},
 	} {
@@ -204,14 +229,14 @@ func TestUpdatePolicyAdmissionRuntimeEnvKnobs(t *testing.T) {
 	schemes := []string{"s3"}
 	buckets := []string{"artifacts.example.com"}
 	adm := map[string]AdmissionRule{"team-a": {
-		AllowConda:               boolPtr(true),
-		AllowUnpinnedPackages:    boolPtr(true),
-		PackageDenylist:          &deny,
-		AllowedIndexHosts:        &hosts,
-		AllowedRemoteSchemes:     &schemes,
-		AllowedRemoteHosts:       &buckets,
-		MaxSetupTimeoutSeconds:   i64(120),
-		MaxDocumentBytes:         i64(4096),
+		AllowConda:             boolPtr(true),
+		AllowUnpinnedPackages:  boolPtr(true),
+		PackageDenylist:        &deny,
+		AllowedIndexHosts:      &hosts,
+		AllowedRemoteSchemes:   &schemes,
+		AllowedRemoteHosts:     &buckets,
+		MaxSetupTimeoutSeconds: i64(120),
+		MaxDocumentBytes:       i64(4096),
 	}}
 	resp, err := s.UpdatePolicy(ctx, UpdatePolicyRequestObject{Body: &UpdatePolicy{Admission: &adm}})
 	if err != nil {
@@ -232,19 +257,21 @@ func TestUpdatePolicyAdmissionRuntimeEnvKnobs(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
-func i64(v int64) *int64     { return &v }
+func i64(v int64) *int64   { return &v }
 
-// The environment reference is inert in #52: a spec that names one is
-// accepted and stored verbatim; nothing resolves it yet (#55).
-func TestEnvironmentReferenceIsAcceptedAndStored(t *testing.T) {
+// The environment reference resolves at admission (#55): a cluster naming
+// a published environment persists the pinned resolution (name, base image,
+// compiled runtime_env, resolved-at) on its spec; an unknown name is a 400
+// with an environment_rejected deny row, exactly like resolveStorage.
+func TestCreateClusterResolvesEnvironment(t *testing.T) {
 	store := newMemStore(t)
-	s := &Server{Store: store}
+	env := smallEnvironment()
+	s := &Server{Store: store, PolicySeed: PolicyConfig{Environments: []core.Environment{env}}}
 	ctx := ctxWithIdentity(testIdentity("op", auth.RoleOperator))
 
-	env := "ml-base"
 	body := CreateCluster{Id: "c1", Spec: ClusterSpec{
-		Name: "c1", Project: "team-a", Image: "rayproject/ray:2.9.0", HeadCpu: "1", HeadMemory: "2Gi",
-		WorkerGroups: []WorkerGroup{}, Environment: &env,
+		Name: "c1", Project: "team-a", Image: env.BaseImage, HeadCpu: "1", HeadMemory: "2Gi",
+		WorkerGroups: []WorkerGroup{}, Environment: strPtr(env.Name),
 	}}
 	if _, err := s.CreateCluster(ctx, CreateClusterRequestObject{Body: &body}); err != nil {
 		t.Fatalf("create with environment: %v", err)
@@ -253,7 +280,35 @@ func TestEnvironmentReferenceIsAcceptedAndStored(t *testing.T) {
 	if err != nil || stored == nil {
 		t.Fatalf("cluster not persisted: %v", err)
 	}
-	if stored.Spec.Environment == nil || *stored.Spec.Environment != "ml-base" {
-		t.Errorf("stored spec environment = %v, want ml-base kept", stored.Spec.Environment)
+	r := stored.Spec.EnvironmentResolved
+	if r == nil || r.Name != env.Name || r.BaseImage != env.BaseImage || r.ResolvedAt == nil {
+		t.Fatalf("environment_resolved = %+v, want the pinned resolution", r)
+	}
+	doc := decodeYaml(t, r.RuntimeEnvYaml)
+	if pip, _ := doc["pip"].([]interface{}); len(pip) != len(env.Packages) {
+		t.Errorf("compiled pip = %v, want the environment's packages", doc["pip"])
+	}
+
+	// An unknown name refuses the create with a deny row naming the reason.
+	unknown := body
+	unknown.Id = "c2"
+	unknown.Spec.Name = "c2"
+	unknown.Spec.Environment = strPtr("nosuch")
+	mustHTTPError(t, mustErr(s.CreateCluster(ctx, CreateClusterRequestObject{Body: &unknown})), http.StatusBadRequest)
+	rows, _, aerr := store.ListAudit(context.Background(), core.AuditFilter{})
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
+	denied := false
+	for _, row := range rows {
+		if row.Event.Decision == core.AuditDecisionDeny && row.Event.Reason != nil && *row.Event.Reason == "environment_rejected" {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Fatal("expected a create_cluster audit deny with reason environment_rejected")
+	}
+	if c, _ := store.Get(context.Background(), "c2"); c != nil {
+		t.Fatal("a refused create must persist nothing")
 	}
 }

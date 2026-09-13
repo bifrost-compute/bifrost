@@ -441,6 +441,22 @@ func (s *Server) CreateCluster(ctx context.Context, req CreateClusterRequestObje
 			return nil, perr
 		}
 	}
+	// Environment resolution (#55): the named catalog entry compiles to the
+	// cluster's governed runtime_env, its base image fills spec.Image the
+	// way a profile's image does (a differing one is the whole-or-nothing
+	// 400), and the resolution is pinned on the spec so a later catalog
+	// edit is never retroactive. Ray has no cluster-level runtime_env on
+	// the CR, so the pinned resolution is the cluster-wide default the
+	// job-submission path applies to later submissions; the cluster's pods
+	// themselves carry no runtime_env (see core.ClusterSpec.EnvironmentResolved).
+	if spec.Environment != nil {
+		envResolved, rerr := s.resolveEnvironment(ctx, spec.Project, *spec.Environment, &spec.Image)
+		if rerr != nil {
+			s.denyCreate(ctx, identity, body.Id, "environment_rejected", http.StatusBadRequest)
+			return nil, rerr
+		}
+		spec.EnvironmentResolved = envResolved
+	}
 	// Shape validation the contract cannot express: every quantity must
 	// parse as a Kubernetes quantity and every worker group's replica bounds
 	// must be coherent. Without this a spec such as head_cpu "lots" is

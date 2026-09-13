@@ -132,6 +132,26 @@ cluster-level runtime_env on the CR — design note). Unknown/foreign name =
 
 Depends on: 2, 3. Blocks: 5.
 
+*Landed (#55, 2026-09-13).* Resolution lives in
+`internal/api/environments.go` (`resolveEnvironment`/`compileEnvironment`),
+called from `finishJobSpec` and `CreateCluster`. Rules as implemented: only
+`published` environments are referenceable (draft and deprecated both 400 a
+new reference; stored resolutions are unaffected); a request supplying both
+`environment` and `runtime_env_yaml` is a 400 — whole-or-nothing, no merge;
+the environment's `base_image` fills the spec's image like a profile's
+(differing image = 400) and passes the admission allowlist through the
+ordinary `admission.Check`; env-var merge order is structured `env_vars`
+plus the escape hatch's (overlaps refused at the catalog edit), and both
+land in Ray's runtime_env, which wins over storage's pod-level `envFrom`
+inside the job. The resolution is pinned on the spec as
+`EnvironmentResolved` (name, base image, compiled YAML, resolved-at) —
+stored only, never on the wire, so the frozen contract is untouched.
+Clusters persist it as the cluster-wide default for later job submissions
+(Ray has no cluster-level runtime_env on the CR; interactive Ray Client
+sessions carry none of Bifrost's at all). The AdmissionRule runtime-env
+knobs (#75) are wired: `runtimeEnvPolicyFor` folds the `*` rule and the
+project's rule into the validator's policy, so they are API-editable now.
+
 ### Issue 5 — MVP: runtime_env-backed environments end to end
 
 As a user, I submit a job naming a published environment and its pip packages

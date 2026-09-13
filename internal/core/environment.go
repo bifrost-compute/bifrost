@@ -11,8 +11,9 @@ import (
 // name (`ClusterSpec.Environment`, `RayJobSpec.Environment`). The catalog
 // rides the policy row like the profile (#7) and storage (#12) catalogs.
 // Pure data: validation of the catalog as a unit is the policy/API edge's
-// job. Resolution of a reference into a concrete runtime_env is the
-// catalog issue's (#54/#55); until then a stored reference is inert.
+// job. Resolution of a reference into a concrete runtime_env (#55) lives in
+// the API edge (environments.go's resolveEnvironment); the resolved form is
+// pinned to the spec as ResolvedEnvironment.
 
 // EnvironmentStatus is an environment's lifecycle state: a draft is
 // editable and not yet selectable, published is selectable by specs,
@@ -146,6 +147,33 @@ type Environment struct {
 	PublishedAt *time.Time `json:"published_at"`
 	// Scan is the recorded scan verdict; nil = never scanned.
 	Scan *EnvironmentScan `json:"scan"`
+}
+
+// ResolvedEnvironment is the server-computed resolution of a spec's
+// Environment reference against the catalog at admission time (#55): the
+// environment's name, its base image and the compiled, governance-checked
+// runtime_env YAML, pinned to the spec so a later catalog edit (or the
+// environment's deprecation) never retroactively changes an admitted
+// workload — the same rule ResolvedStorage pins storage with. Persisted,
+// never echoed: RayJobView and ClusterView carry no spec.
+//
+// Precedence with storage (#12): an env-mode storage entry lands as pod
+// `envFrom` (the container environment), while RuntimeEnvYaml's env_vars
+// land in Ray's runtime_env, applied to the job's processes on top of the
+// container environment — for a variable named by both, the environment's
+// value is the one the job sees.
+type ResolvedEnvironment struct {
+	// Name is the catalog name the spec referenced.
+	Name string `json:"name"`
+	// BaseImage is the environment's base image at resolution time; "" =
+	// the environment fixed none and the spec's own image runs.
+	BaseImage string `json:"base_image"`
+	// RuntimeEnvYaml is the compiled runtime_env document (packages -> pip,
+	// env_vars -> env_vars, the escape hatch merged in), already through the
+	// #53 governance validator. "" = the environment carries no runtime env.
+	RuntimeEnvYaml string `json:"runtime_env_yaml"`
+	// ResolvedAt is when admission resolved the reference.
+	ResolvedAt *time.Time `json:"resolved_at"`
 }
 
 // environmentAlias breaks the recursion MarshalJSON would otherwise cause

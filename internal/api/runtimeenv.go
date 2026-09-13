@@ -8,14 +8,14 @@
 //
 // Where the knobs live: the contract's AdmissionRule gained the
 // RuntimeEnvPolicy field set with the environment contract (#52), so the
-// rule set rides the policy row and is API-editable as data — but this
-// validator still applies the governed defaults below; the per-project
-// wiring from admission rule to validator is the environment catalog
-// issue (#54). The serve flag --allow-ungoverned-runtime-env remains the
-// upgrader escape hatch.
+// rule set rides the policy row and is API-editable as data; finishJobSpec
+// and environment resolution (#55) read the effective per-project rule set
+// through runtimeEnvPolicyFor. The serve flag --allow-ungoverned-runtime-env
+// remains the upgrader escape hatch.
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -80,6 +80,62 @@ const (
 	// DefaultMaxDocumentBytes caps the submitted runtime_env_yaml document.
 	DefaultMaxDocumentBytes = 64 * 1024
 )
+
+// runtimeEnvPolicyFor is the effective runtime-env governance rule set for
+// project (#55): the "*" admission rule's knobs, each overridden by the
+// project's own rule where that rule sets it — admissionFor's inheritance
+// applied to the #52 knob set. A list overrides when non-empty, a cap when
+// > 0, a permit toggle when true (a project's rule can widen a "*"
+// default-deny but cannot re-narrow a "*" permit: the toggles carry no
+// set/unset distinction once stored). No policy row, or rules that set no
+// knobs, yield the zero value — the governed defaults.
+func (s *Server) runtimeEnvPolicyFor(ctx context.Context, project string) (RuntimeEnvPolicy, error) {
+	p, err := effectivePolicy(ctx, s.Store, &s.PolicySeed)
+	if err != nil {
+		return RuntimeEnvPolicy{}, err
+	}
+	var out RuntimeEnvPolicy
+	if p == nil {
+		return out, nil
+	}
+	for _, key := range []string{AdmissionEveryProject, project} {
+		rule, ok := p.Admission[key]
+		if !ok {
+			continue
+		}
+		if rule.AllowPyExecutable {
+			out.AllowPyExecutable = true
+		}
+		if rule.AllowImageURI {
+			out.AllowImageURI = true
+		}
+		if rule.AllowConda {
+			out.AllowConda = true
+		}
+		if rule.AllowUnpinnedPackages {
+			out.AllowUnpinnedPackages = true
+		}
+		if len(rule.PackageDenylist) > 0 {
+			out.DeniedPackages = append([]string(nil), rule.PackageDenylist...)
+		}
+		if len(rule.AllowedIndexHosts) > 0 {
+			out.AllowedIndexHosts = append([]string(nil), rule.AllowedIndexHosts...)
+		}
+		if len(rule.AllowedRemoteSchemes) > 0 {
+			out.AllowedRemoteSchemes = append([]string(nil), rule.AllowedRemoteSchemes...)
+		}
+		if len(rule.AllowedRemoteHosts) > 0 {
+			out.AllowedRemoteHosts = append([]string(nil), rule.AllowedRemoteHosts...)
+		}
+		if rule.MaxSetupTimeoutSeconds > 0 {
+			out.MaxSetupTimeoutSeconds = rule.MaxSetupTimeoutSeconds
+		}
+		if rule.MaxDocumentBytes > 0 {
+			out.MaxDocumentBytes = int(rule.MaxDocumentBytes)
+		}
+	}
+	return out, nil
+}
 
 // runtimeEnvDeniedFields are the allowlist-exempt fields a policy can
 // re-enable individually; every other field outside the default allowlist

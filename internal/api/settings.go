@@ -441,7 +441,7 @@ func admissionToWire(in map[string]core.AdmissionRule) map[string]AdmissionRule 
 // non-empty project keys, non-empty image prefixes, non-negative caps. The
 // runtime-env governance knobs (#52) are copied verbatim onto the stored
 // rule — they make the #53 validator's hardcoded defaults API-editable;
-// the validator itself reads them starting with the catalog issue (#54).
+// the validator reads them through runtimeEnvPolicyFor (#55).
 func admissionFromWire(in map[string]AdmissionRule) (map[string]core.AdmissionRule, error) {
 	out := make(map[string]core.AdmissionRule, len(in))
 	for project, w := range in {

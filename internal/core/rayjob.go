@@ -43,9 +43,13 @@ type RayJobSpec struct {
 	// zero-valued fields here; nil = none.
 	Profile *string `json:"profile"`
 	// Environment is the environment catalog name (#52) whose image,
-	// packages and env vars this job runs with; nil = none. Accepted and
-	// stored; resolution arrives with the catalog issue.
+	// packages and env vars this job runs with; nil = none. Resolved
+	// against the catalog at admission into EnvironmentResolved (#55).
 	Environment *string `json:"environment"`
+	// EnvironmentResolved is the server-computed resolution of Environment
+	// against the catalog at admission time (never retroactive). Persisted,
+	// never echoed: RayJobView carries no spec.
+	EnvironmentResolved *ResolvedEnvironment `json:"environment_resolved,omitempty"`
 	// Storage names storage catalog entries (#12) delivered to the job's
 	// pods. Names only — the catalog is resolved server-side into
 	// StorageResolved.
