@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/bifrost-compute/bifrost/internal/auth"
 	"github.com/bifrost-compute/bifrost/internal/controller"
@@ -553,7 +554,9 @@ func (s *Server) GetPolicy(ctx context.Context, _ GetPolicyRequestObject) (GetPo
 
 // UpdatePolicy replaces sections of the governance policy (section-replace
 // semantics — see UpdatePolicy's generated doc comment). Admin-only; emits
-// an update_policy audit event on success.
+// an update_policy audit event on success, plus one publish_environment /
+// deprecate_environment row per environment lifecycle change an
+// environments-section edit performed (#57).
 func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject) (UpdatePolicyResponseObject, error) {
 	identity, _ := IdentityFromContext(ctx)
 	if err := Authorize(ctx, s.Store, identity, auth.Admin, auth.TargetCluster); err != nil {
@@ -668,9 +671,20 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 	// Environments (#52) follow the same section-replace rule as profiles,
 	// admission and storage: a present key replaces the whole catalog (`[]`
 	// clears it), an absent key leaves it untouched. References already
-	// admitted onto specs are never retroactive, exactly like storage.
+	// admitted onto specs are never retroactive, exactly like storage. The
+	// replacement additionally passes the lifecycle transition discipline
+	// (#57, applyEnvironmentTransitions): publishes are stamped with the
+	// caller's identity, and each publish/deprecate becomes an audit row
+	// once the edit lands.
+	var envEvents []environmentLifecycleEvent
 	if body.Environments != nil {
-		next.Environments = environments
+		adjusted, events, err := applyEnvironmentTransitions(next.Environments, environments,
+			identitySubject(identity), time.Unix(int64(controller.NowUnix()), 0).UTC())
+		if err != nil {
+			return nil, err
+		}
+		next.Environments = adjusted
+		envEvents = events
 	}
 	// A profile's storage must name entries of the catalog it will be
 	// resolved against, whichever section this request replaced: a
@@ -692,6 +706,21 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 		Action:   &action,
 		Status:   &status,
 	})
+	// One lifecycle row per environment the edit published or deprecated
+	// (#57). The row names actor, action and time; the catalog entry itself
+	// carries the durable per-environment attribution (published_by /
+	// published_at) — AuditEvent has no free-form detail field, and adding
+	// one is a schema change the fixed field set deliberately avoids.
+	for _, ev := range envEvents {
+		a := ev.action
+		EmitAudit(ctx, s.Store, &core.AuditEvent{
+			Ts:       controller.NowUnix(),
+			Subject:  identitySubject(identity),
+			Decision: core.AuditDecisionAllow,
+			Action:   &a,
+			Status:   &status,
+		})
+	}
 	return UpdatePolicy200JSONResponse(policyView(next, "store")), nil
 }
 

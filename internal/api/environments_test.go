@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bifrost-compute/bifrost/internal/auth"
+	"github.com/bifrost-compute/bifrost/internal/controller"
 	"github.com/bifrost-compute/bifrost/internal/core"
 )
 
@@ -215,6 +216,233 @@ func TestUpdatePolicyEnvironmentsSection(t *testing.T) {
 	}
 	if pv = mustResponse[UpdatePolicy200JSONResponse](t, resp); len(*pv.Environments) != 0 {
 		t.Errorf("clear left %+v", pv)
+	}
+}
+
+// --- Publication workflow, versioning, audit (#57) ---
+
+// putEnvironments replaces the environments section via UpdatePolicy and
+// returns the handler's error (nil on success).
+func putEnvironments(t *testing.T, s *Server, ctx context.Context, envs []core.Environment) error {
+	t.Helper()
+	wire := environmentsToWire(envs)
+	_, err := s.UpdatePolicy(ctx, UpdatePolicyRequestObject{Body: &UpdatePolicy{Environments: &wire}})
+	return err
+}
+
+// catalogByName reads the stored catalog back through GetPolicy.
+func catalogByName(t *testing.T, s *Server, ctx context.Context) map[string]EnvironmentSpec {
+	t.Helper()
+	resp, err := s.GetPolicy(ctx, GetPolicyRequestObject{})
+	if err != nil {
+		t.Fatalf("get_policy: %v", err)
+	}
+	pv := mustResponse[GetPolicy200JSONResponse](t, resp)
+	out := make(map[string]EnvironmentSpec)
+	if pv.Environments != nil {
+		for _, e := range *pv.Environments {
+			out[e.Name] = e
+		}
+	}
+	return out
+}
+
+func countAuditAction(t *testing.T, store controller.Store, action string) int {
+	t.Helper()
+	rows, _, err := store.ListAudit(context.Background(), core.AuditFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, r := range rows {
+		if r.Event.Action != nil && *r.Event.Action == action {
+			n++
+		}
+	}
+	return n
+}
+
+// lifecycleEnv is a bare valid catalog entry at the given status; published
+// and deprecated entries carry the publish metadata those statuses store.
+func lifecycleEnv(name string, status core.EnvironmentStatus) core.Environment {
+	e := core.Environment{Name: name, BaseImage: "rayproject/ray:2.9.0", Status: status}
+	if status != core.EnvironmentStatusDraft {
+		when := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		e.PublishedBy = strPtr("root")
+		e.PublishedAt = &when
+	}
+	return e
+}
+
+// The transition table (#57): an environments-section PUT may publish a
+// draft (or create a published entry outright — an implicit publish, stamped
+// with the caller), edit within a status, deprecate a published entry,
+// re-draft a deprecated one, and remove any entry; it may NOT un-publish to
+// draft, deprecate a draft, or republish a deprecated entry directly.
+func TestEnvironmentStatusTransitions(t *testing.T) {
+	store := newMemStore(t)
+	s := &Server{Store: store, PolicySeed: PolicyConfig{Environments: []core.Environment{
+		lifecycleEnv("d", core.EnvironmentStatusDraft),
+		lifecycleEnv("p", core.EnvironmentStatusPublished),
+		lifecycleEnv("x", core.EnvironmentStatusDeprecated),
+		lifecycleEnv("gone", core.EnvironmentStatusPublished),
+	}}}
+	ctx := ctxWithIdentity(admin())
+
+	// Legal: draft->published (stamped by the caller), published->published
+	// with the metadata left absent (the stored entry's rides forward),
+	// deprecated->draft (stale metadata cleared), new entries at every
+	// status, and a published entry removed outright.
+	editP := core.Environment{Name: "p", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusPublished}
+	redraft := core.Environment{Name: "x", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusDraft,
+		PublishedBy: strPtr("root"), PublishedAt: lifecycleEnv("x", core.EnvironmentStatusDeprecated).PublishedAt}
+	if err := putEnvironments(t, s, ctx, []core.Environment{
+		{Name: "d", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusPublished},
+		editP,
+		redraft,
+		lifecycleEnv("new-draft", core.EnvironmentStatusDraft),
+		{Name: "new-pub", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusPublished},
+		lifecycleEnv("new-dep", core.EnvironmentStatusDeprecated),
+	}); err != nil {
+		t.Fatalf("legal edit: %v", err)
+	}
+
+	got := catalogByName(t, s, ctx)
+	if st := got["d"].Status; st == nil || *st != Published {
+		t.Errorf("d status = %+v, want published", got["d"])
+	}
+	if got["d"].PublishedBy == nil || *got["d"].PublishedBy != "root" || got["d"].PublishedAt == nil {
+		t.Errorf("d publish metadata = by %v at %v, want stamped by the caller", got["d"].PublishedBy, got["d"].PublishedAt)
+	}
+	if got["p"].PublishedBy == nil || *got["p"].PublishedBy != "root" || got["p"].PublishedAt == nil {
+		t.Errorf("p metadata left absent = by %v at %v, want the stored entry's carried forward", got["p"].PublishedBy, got["p"].PublishedAt)
+	}
+	if st := got["x"].Status; st == nil || *st != Draft || got["x"].PublishedBy != nil || got["x"].PublishedAt != nil {
+		t.Errorf("x re-drafted = %+v, want draft with the publish metadata cleared", got["x"])
+	}
+	if st := got["new-draft"].Status; st == nil || *st != Draft {
+		t.Errorf("new-draft = %+v, want draft", got["new-draft"])
+	}
+	if st := got["new-pub"].Status; st == nil || *st != Published || got["new-pub"].PublishedBy == nil || got["new-pub"].PublishedAt == nil {
+		t.Errorf("new-pub = %+v, want published and stamped", got["new-pub"])
+	}
+	if st := got["new-dep"].Status; st == nil || *st != Deprecated {
+		t.Errorf("new-dep = %+v, want deprecated (a catalog may record an entry as retired outright)", got["new-dep"])
+	}
+	if _, ok := got["gone"]; ok {
+		t.Errorf("gone was not removed: %+v", got["gone"])
+	}
+	// Two publishes happened (d, new-pub): one audit row each.
+	if n := countAuditAction(t, store, "publish_environment"); n != 2 {
+		t.Errorf("publish_environment rows = %d, want 2 (d and new-pub)", n)
+	}
+	if n := countAuditAction(t, store, "deprecate_environment"); n != 0 {
+		t.Errorf("deprecate_environment rows = %d, want 0 so far", n)
+	}
+
+	// Illegal transitions: a 400 naming the entry, and the catalog does not
+	// move.
+	before := catalogByName(t, s, ctx)
+	for name, envs := range map[string][]core.Environment{
+		"published to draft":      {lifecycleEnv("d", core.EnvironmentStatusDraft)},
+		"draft to deprecated":     {lifecycleEnv("new-draft", core.EnvironmentStatusDeprecated)},
+		"deprecated to published": {lifecycleEnv("new-dep", core.EnvironmentStatusPublished)},
+	} {
+		err := putEnvironments(t, s, ctx, envs)
+		if err == nil {
+			t.Errorf("%s: accepted, want 400", name)
+			continue
+		}
+		mustHTTPError(t, err, 400)
+	}
+	if after := catalogByName(t, s, ctx); len(after) != len(before) {
+		t.Errorf("an illegal transition moved the catalog: %d entries, want %d", len(after), len(before))
+	}
+
+	// Legal: published -> deprecated emits deprecate_environment; the PUT
+	// also drops every other name — removal is allowed at any status,
+	// mirroring the profile and storage sections.
+	if err := putEnvironments(t, s, ctx, []core.Environment{lifecycleEnv("d", core.EnvironmentStatusDeprecated)}); err != nil {
+		t.Fatalf("deprecate: %v", err)
+	}
+	got = catalogByName(t, s, ctx)
+	if st := got["d"].Status; st == nil || *st != Deprecated || got["d"].PublishedBy == nil {
+		t.Errorf("d deprecated = %+v, want deprecated with the publish metadata kept as attribution", got["d"])
+	}
+	if len(got) != 1 {
+		t.Errorf("catalog after the deprecating edit = %d entries, want just d (removal is allowed at any status)", len(got))
+	}
+	if n := countAuditAction(t, store, "deprecate_environment"); n != 1 {
+		t.Errorf("deprecate_environment rows = %d, want 1", n)
+	}
+}
+
+// A published entry must carry published_by and published_at (#57): a
+// seeded published entry that never got stamped, echoed back without the
+// metadata, is a 400 naming the entry; supplying the metadata is the fix.
+// In dev mode (no caller identity to stamp from) a new published entry
+// without an explicit published_by is refused the same way.
+func TestPublishedEnvironmentWithoutMetadataIsRefused(t *testing.T) {
+	s := &Server{Store: newMemStore(t), PolicySeed: PolicyConfig{Environments: []core.Environment{
+		{Name: "bare", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusPublished},
+	}}}
+	ctx := ctxWithIdentity(admin())
+	bare := core.Environment{Name: "bare", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusPublished}
+	mustHTTPError(t, putEnvironments(t, s, ctx, []core.Environment{bare}), 400)
+	// Supplying the metadata on the edit is the remediation.
+	if err := putEnvironments(t, s, ctx, []core.Environment{lifecycleEnv("bare", core.EnvironmentStatusPublished)}); err != nil {
+		t.Fatalf("stamped edit of the seeded entry: %v", err)
+	}
+
+	// Dev mode: no identity, so nothing stamps a publish the entry doesn't
+	// stamp itself.
+	dev := &Server{Store: newMemStore(t)}
+	err := putEnvironments(t, dev, context.Background(), []core.Environment{
+		{Name: "e", BaseImage: "rayproject/ray:2.9.0", Status: core.EnvironmentStatusPublished},
+	})
+	mustHTTPError(t, err, 400)
+	if err := putEnvironments(t, dev, context.Background(), []core.Environment{
+		lifecycleEnv("e", core.EnvironmentStatusPublished),
+	}); err != nil {
+		t.Fatalf("dev-mode publish with explicit metadata: %v", err)
+	}
+}
+
+// Publishing is admin-only by construction: the catalog rides the policy
+// row, and policy writes need Admin on the cluster — operator, developer,
+// auditor and developer-with-project-scope alike are 403 with a deny audit
+// row (#57's RBAC matrix, mirroring the r03 policy-write matrix).
+func TestUpdatePolicyEnvironmentsAdminOnly(t *testing.T) {
+	store := newMemStore(t)
+	s := &Server{Store: store}
+	wire := environmentsToWire([]core.Environment{lifecycleEnv("e", core.EnvironmentStatusDraft)})
+	for _, id := range []*auth.Identity{
+		testIdentity("op", auth.RoleOperator),
+		testIdentity("dev", auth.RoleDeveloper),
+		testIdentity("aud", auth.RoleAuditor),
+		projectMember("pam", auth.RoleOperator, "team-a"),
+	} {
+		_, err := s.UpdatePolicy(ctxWithIdentity(id), UpdatePolicyRequestObject{Body: &UpdatePolicy{Environments: &wire}})
+		mustHTTPError(t, err, 403)
+	}
+	rows, _, err := store.ListAudit(context.Background(), core.AuditFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	denies := 0
+	for _, r := range rows {
+		e := r.Event
+		if e.Decision == core.AuditDecisionDeny && e.Reason != nil && *e.Reason == "insufficient_permission" &&
+			e.Required != nil && e.Required.Action == "admin" && e.Required.Target == "cluster" {
+			denies++
+		}
+	}
+	if denies != 4 {
+		t.Errorf("deny audit rows = %d, want one per refused publish attempt", denies)
+	}
+	// Nothing was written.
+	if p, err := store.GetPolicy(context.Background()); err != nil || p != nil {
+		t.Errorf("policy row after refused writes = %+v, %v; want none", p, err)
 	}
 }
 
