@@ -3,6 +3,8 @@ package api
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestRuntimeEnvValidate covers the #53 rule set: the default governed
@@ -194,4 +196,98 @@ func TestRuntimeEnvValidateZeroValueIsTheGovernedDefault(t *testing.T) {
 	if err := (RuntimeEnvPolicy{}).Validate("working_dir: s3://bucket/code.zip"); err == nil {
 		t.Fatal("zero-value policy must refuse remote working_dir")
 	}
+}
+
+// setupTimeoutOf decodes the config.setup_timeout_seconds a document
+// carries; 0, false when it sets none.
+func setupTimeoutOf(t *testing.T, raw string) (int64, bool) {
+	t.Helper()
+	var doc map[string]interface{}
+	if err := yaml.NewDecoder(strings.NewReader(raw)).Decode(&doc); err != nil {
+		t.Fatalf("document does not parse: %v\n%s", err, raw)
+	}
+	cfg, _ := doc["config"].(map[string]interface{})
+	v, set := cfg["setup_timeout_seconds"]
+	if !set {
+		return 0, false
+	}
+	secs, ok := yamlInt(v)
+	if !ok {
+		t.Fatalf("setup_timeout_seconds is not an integer: %v", v)
+	}
+	return secs, true
+}
+
+// EnforceSetupTimeout (#56): a runtime-env document without a setup timeout
+// gets the policy default injected (600, or the policy cap when tighter); a
+// document that sets one is returned byte-identical; an empty document
+// carries no runtime env and is left alone. The injected document still
+// passes Validate under the same policy.
+func TestRuntimeEnvEnforceSetupTimeout(t *testing.T) {
+	t.Run("inject when absent", func(t *testing.T) {
+		out, err := (RuntimeEnvPolicy{}).EnforceSetupTimeout("pip: [numpy==1.26.4]\nenv_vars:\n  A: b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secs, set := setupTimeoutOf(t, out); !set || secs != DefaultSetupTimeoutSeconds {
+			t.Fatalf("injected timeout = %d (set %v), want %d", secs, set, DefaultSetupTimeoutSeconds)
+		}
+		if !strings.Contains(out, "numpy==1.26.4") || !strings.Contains(out, "A: b") {
+			t.Fatalf("injection lost the document's own fields:\n%s", out)
+		}
+		if err := (RuntimeEnvPolicy{}).Validate(out); err != nil {
+			t.Fatalf("the injected document must pass its own policy's validation: %v", err)
+		}
+	})
+	t.Run("preserve an explicit timeout verbatim", func(t *testing.T) {
+		raw := "pip: [numpy==1.26.4]\nconfig:\n  setup_timeout_seconds: 300\n  eager_install: true"
+		out, err := (RuntimeEnvPolicy{}).EnforceSetupTimeout(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != raw {
+			t.Fatalf("a document with its own timeout must pass through byte-identical:\n%s", out)
+		}
+	})
+	t.Run("merge into an existing config", func(t *testing.T) {
+		out, err := (RuntimeEnvPolicy{}).EnforceSetupTimeout("config:\n  eager_install: true")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secs, set := setupTimeoutOf(t, out); !set || secs != DefaultSetupTimeoutSeconds {
+			t.Fatalf("injected timeout = %d (set %v)", secs, set)
+		}
+		if !strings.Contains(out, "eager_install: true") {
+			t.Fatalf("the existing config key was dropped:\n%s", out)
+		}
+	})
+	t.Run("a tighter policy cap lowers the injected default", func(t *testing.T) {
+		out, err := (RuntimeEnvPolicy{MaxSetupTimeoutSeconds: 120}).EnforceSetupTimeout("pip: [numpy==1.26.4]")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secs, set := setupTimeoutOf(t, out); !set || secs != 120 {
+			t.Fatalf("injected timeout = %d (set %v), want the policy cap 120", secs, set)
+		}
+	})
+	t.Run("a looser policy cap does not raise the default", func(t *testing.T) {
+		out, err := (RuntimeEnvPolicy{MaxSetupTimeoutSeconds: 3600}).EnforceSetupTimeout("pip: [numpy==1.26.4]")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secs, set := setupTimeoutOf(t, out); !set || secs != DefaultSetupTimeoutSeconds {
+			t.Fatalf("injected timeout = %d (set %v), want %d", secs, set, DefaultSetupTimeoutSeconds)
+		}
+	})
+	t.Run("empty and null documents stay untouched", func(t *testing.T) {
+		for _, raw := range []string{"", "  \n ", "null", "{}"} {
+			out, err := (RuntimeEnvPolicy{}).EnforceSetupTimeout(raw)
+			if err != nil {
+				t.Fatalf("EnforceSetupTimeout(%q) = %v", raw, err)
+			}
+			if out != raw {
+				t.Fatalf("EnforceSetupTimeout(%q) = %q, want unchanged", raw, out)
+			}
+		}
+	})
 }

@@ -62,8 +62,8 @@ func TestBuildFromFixture(t *testing.T) {
 	if r8.Tests != 2 || r8.Passed != 1 || r8.Skipped != 1 || r8.Status != "partial" {
 		t.Errorf("row 8 = %+v", r8)
 	}
-	if len(rep.Untested()) != 13 {
-		t.Errorf("untested = %d, want 13", len(rep.Untested()))
+	if len(rep.Untested()) != 14 {
+		t.Errorf("untested = %d, want 14", len(rep.Untested()))
 	}
 }
 

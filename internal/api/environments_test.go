@@ -288,6 +288,10 @@ func TestCreateClusterResolvesEnvironment(t *testing.T) {
 	if pip, _ := doc["pip"].([]interface{}); len(pip) != len(env.Packages) {
 		t.Errorf("compiled pip = %v, want the environment's packages", doc["pip"])
 	}
+	// #56: the pinned resolution carries the bounded setup timeout.
+	if secs, set := setupTimeoutOf(t, r.RuntimeEnvYaml); !set || secs != DefaultSetupTimeoutSeconds {
+		t.Errorf("pinned resolution setup timeout = %d (set %v), want the injected %d", secs, set, DefaultSetupTimeoutSeconds)
+	}
 
 	// An unknown name refuses the create with a deny row naming the reason.
 	unknown := body

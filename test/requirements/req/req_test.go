@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-func TestRequirementsHasEighteenRows(t *testing.T) {
+func TestRequirementsRowsAreNumberedInOrder(t *testing.T) {
 	rs := Requirements()
-	if len(rs) != 18 {
-		t.Fatalf("got %d requirements, want 18", len(rs))
+	if len(rs) < 18 {
+		t.Fatalf("got %d requirements; the Ray Software Pack table has 18 rows and additions only grow it", len(rs))
 	}
 	for i, r := range rs {
 		if r.N != i+1 {
-			t.Errorf("row %d has n=%d; rows must be 1..18 in order", i, r.N)
+			t.Errorf("row %d has n=%d; rows must be numbered 1..%d in order", i, r.N, len(rs))
 		}
 		if r.Title == "" || r.Priority == "" {
 			t.Errorf("row %d missing title or priority", r.N)
@@ -22,7 +22,7 @@ func TestRequirementsHasEighteenRows(t *testing.T) {
 }
 
 func TestCoversPanicsOutOfRange(t *testing.T) {
-	for _, n := range []int{0, 19, -1} {
+	for _, n := range []int{0, len(Requirements()) + 1, -1} {
 		func() {
 			defer func() {
 				if recover() == nil {

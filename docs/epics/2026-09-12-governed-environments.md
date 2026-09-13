@@ -169,6 +169,31 @@ works behind default-deny egress with only the proxy allowed.
 
 Depends on: 4. **This is the MVP's done line.**
 
+*Landed (#56, 2026-09-13).* The bounded timeout is
+`RuntimeEnvPolicy.EnforceSetupTimeout` (`internal/api/runtimeenv.go`),
+applied in `finishJobSpec` (hand-written and environment-compiled
+documents alike) and in `resolveEnvironment` (the cluster path's pinned
+default): a runtime env without `config.setup_timeout_seconds` is stored
+with the policy default injected — 600s, lowered to a tighter policy cap —
+and a caller-pinned timeout within the cap is kept verbatim. Failure
+surfacing needed no new plumbing: KubeRay copies Ray's job failure message
+(including the runtime-env setup error) into `RayJob.Status.Message`, which
+already flows `ObservedJobFromRayJob` → `RecordRayJobObservation` → the job
+view's `message`; the L2 fake gained the `bifrost-uninstallable` package
+marker (`inproc.FakeUninstallablePackage`) so that path is testable without
+a cluster. Tenant egress: `serve --package-proxy <ip-or-cidr>:<port>`
+(operator-only, no user control) makes the live client apply a per-workload
+egress NetworkPolicy (`provision.PackageProxyEgressNetworkPolicy`) to the
+proxy's address and port — only for jobs/clusters whose admitted runtime
+env actually installs packages (`provision.RuntimeEnvInstallsPackages`);
+with no proxy configured nothing is written and installs work only against
+registries the tenant policies already reach. The requirement probe is
+`test/requirements/r19_environments` (requirement row 19): L2 green,
+including the install-failure message and the refusal audit rows; the real
+pip-install-and-import assertion is gated on a `package-proxy` capability
+no target declares yet — first execution is the next kind run with a proxy
+deployed.
+
 ### Issue 6 — Publication workflow, versioning, audit
 
 As an admin, I want environments drafted, published, and deprecated with an
@@ -253,5 +278,5 @@ requirement for pre-scanned immutable artifacts.
 
 - User-submitted draft environments vs admin-only catalog — recommend
   admin-only for MVP (Issue 6), matching profiles.
-- New requirement number for traceability (r10/r11 are adjacent but distinct)
-  — add a row to `docs/requirements/` when work starts.
+- ~~New requirement number for traceability~~ — resolved (#56): row 19,
+  `r19_environments`.

@@ -63,6 +63,7 @@ type serveOptions struct {
 	GatewayExternalBase     string
 	ServicesPerProject      int
 	RuntimeEnvUngoverned    bool
+	PackageProxy            string
 }
 
 func newServeCmd() *cobra.Command {
@@ -122,6 +123,10 @@ func newServeCmd() *cobra.Command {
 	f.BoolVar(&opts.LocalAuth, "local-auth", false,
 		"Enable local (IdP-free) username/password auth (ADR-0011); counts as configured authentication "+
 			"for the fail-closed non-loopback rule")
+	f.StringVar(&opts.PackageProxy, "package-proxy", "",
+		"Platform package proxy as <ip-or-cidr>:<port> (e.g. 10.96.10.5:3128): workloads whose runtime env "+
+			"installs packages get a per-workload egress NetworkPolicy to it under the default-deny tenant posture (#56). "+
+			"Empty = no allowance; pip installs then work only against registries the tenant policies already reach")
 	return cmd
 }
 
@@ -247,13 +252,20 @@ func buildServer(ctx context.Context, opts serveOptions) (*builtServer, error) {
 		if err != nil {
 			return fail(err)
 		}
-		c, err := live.NewClient(restCfg, opts.Namespace, opts.Autoscaling, live.WithScheduling(sched))
+		proxy, err := provision.ParsePackageProxy(opts.PackageProxy)
+		if err != nil {
+			return fail(fmt.Errorf("--package-proxy: %w", err))
+		}
+		c, err := live.NewClient(restCfg, opts.Namespace, opts.Autoscaling, live.WithScheduling(sched), live.WithPackageProxy(proxy))
 		if err != nil {
 			return fail(err)
 		}
 		liveClient = c
 		if !sched.IsZero() {
 			slog.Info("tenant pod scheduling", "scheduling", sched.String())
+		}
+		if proxy != nil {
+			slog.Info("package proxy egress enabled for installing workloads", "proxy", proxy.String())
 		}
 		cfg.Provisioner = c
 		cfg.ServiceProvisioner = live.NewServiceClient(c)

@@ -168,6 +168,11 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 	// (#55) takes the same path: resolution already validated it, and the
 	// check is idempotent. The --allow-ungoverned-runtime-env serve flag
 	// restores the pre-#53 verbatim passthrough for upgraders.
+	//
+	// Once validated, a document without a setup timeout gets the policy
+	// default injected (#56): the bound rides the stored spec into the CR,
+	// so an install that wedges fails at the timeout instead of hanging
+	// forever. A document that sets its own timeout is kept verbatim.
 	if !s.RuntimeEnvUngoverned {
 		runtimeEnvPolicy, perr := s.runtimeEnvPolicyFor(ctx, view.Project)
 		if perr != nil {
@@ -175,6 +180,17 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 		}
 		if verr := runtimeEnvPolicy.Validate(spec.RuntimeEnvYaml); verr != nil {
 			return "runtime_env_rejected", badRequest(verr.Error())
+		}
+		bounded, berr := runtimeEnvPolicy.EnforceSetupTimeout(spec.RuntimeEnvYaml)
+		if berr != nil {
+			return "runtime_env_rejected", badRequest(berr.Error())
+		}
+		spec.RuntimeEnvYaml = bounded
+		if envResolved != nil {
+			// The pinned resolution is the compiled document the CR carries;
+			// keep the two identical (resolution already injected the same
+			// bound, so this is normally a no-op assignment).
+			envResolved.RuntimeEnvYaml = bounded
 		}
 	}
 	// Storage (requirement 12): names are resolved against the catalog after

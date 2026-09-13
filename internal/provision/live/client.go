@@ -68,6 +68,11 @@ type Client struct {
 	// applies (provision.Scheduling): deployment-wide placement such as
 	// the tolerations a tainted user node group demands.
 	scheduling provision.Scheduling
+	// packageProxy, when configured (`serve --package-proxy`), is the one
+	// egress exception the default-deny posture grants a workload whose
+	// runtime env installs packages (provision.PackageProxy, issue #56).
+	// nil = no allowance is ever written.
+	packageProxy *provision.PackageProxy
 
 	// apiServer caches where the API server answers (see
 	// provision.APIServerEndpoint): read from the `kubernetes` Endpoints
@@ -118,6 +123,14 @@ type Option func(*Client)
 // provision.Scheduling): `serve --ray-node-selector` / `--ray-tolerations`.
 func WithScheduling(s provision.Scheduling) Option {
 	return func(c *Client) { c.scheduling = s }
+}
+
+// WithPackageProxy sets the platform package proxy (`serve
+// --package-proxy`, issue #56): workloads whose runtime env installs
+// packages get a per-workload egress NetworkPolicy to it under the
+// default-deny posture. nil (the flag's default) writes no allowance.
+func WithPackageProxy(proxy *provision.PackageProxy) Option {
+	return func(c *Client) { c.packageProxy = proxy }
 }
 
 func NewClient(cfg *rest.Config, namespace string, autoscaling bool, opts ...Option) (*Client, error) {
@@ -288,11 +301,12 @@ func ensureStorageSourcesExist(ctx context.Context, c client.Client, namespace s
 	return nil
 }
 
-// deleteClusterAllow deletes the per-cluster allow policy for id, and the
-// autoscaler egress policy if the cluster had one. Idempotent: already-gone
-// is success. Ported from kuberay_client.rs:239-256.
+// deleteClusterAllow deletes the per-cluster allow policy for id, plus the
+// per-workload egress policies a cluster may have carried (autoscaler,
+// package proxy). Idempotent: already-gone is success. Ported from
+// kuberay_client.rs:239-256.
 func (c *Client) deleteClusterAllow(ctx context.Context, id string) error {
-	for _, name := range []string{provision.ClusterAllowPolicyName(id), provision.AutoscalerPolicyName(id)} {
+	for _, name := range []string{provision.ClusterAllowPolicyName(id), provision.AutoscalerPolicyName(id), provision.PackageProxyPolicyName(id)} {
 		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.namespace}}
 		if err := c.c.Delete(ctx, np); err != nil && !apierrors.IsNotFound(err) {
 			return wrapErr(err)
@@ -322,6 +336,32 @@ func (c *Client) ensureAutoscalerEgress(ctx context.Context, id string) error {
 		return err
 	}
 	return c.applyNetworkPolicy(ctx, c.namespace, provision.AutoscalerEgressNetworkPolicy(id, api))
+}
+
+// ensurePackageProxyEgress applies the per-workload egress policy that lets
+// this workload's pods reach the platform package proxy (issue #56) — but
+// only when a proxy is configured AND the workload's runtime env actually
+// installs packages (provision.RuntimeEnvInstallsPackages): a workload
+// without a pip install gets no allowance at all. Skipped under an
+// admin-managed default-deny, like every policy Bifrost writes.
+//
+// runtimeEnvYaml is the workload's admitted runtime env: a job's
+// spec.RuntimeEnvYaml (environment-compiled or hand-written), or a
+// cluster's pinned environment resolution (Ray has no cluster-level
+// runtime_env, but the resolution is the cluster-wide default jobs run
+// with, and Ray's agent installs its packages on the cluster's nodes).
+func (c *Client) ensurePackageProxyEgress(ctx context.Context, id, runtimeEnvYaml string) error {
+	if c.packageProxy == nil || !provision.RuntimeEnvInstallsPackages(runtimeEnvYaml) {
+		return nil
+	}
+	deny, err := c.adminManagedDeny(ctx, c.namespace)
+	if err != nil {
+		return err
+	}
+	if deny {
+		return nil
+	}
+	return c.applyNetworkPolicy(ctx, c.namespace, provision.PackageProxyEgressNetworkPolicy(id, c.packageProxy))
 }
 
 // apiServerEndpoint reads (and caches) the `kubernetes` EndpointSlice in
@@ -440,6 +480,16 @@ func (c *Client) Apply(ctx context.Context, id core.ClusterId, spec *core.Cluste
 		if err := c.ensureAutoscalerEgress(ctx, string(id)); err != nil {
 			return provision.ApplyResponse{}, err
 		}
+	}
+	// Package installs under default-deny egress (issue #56): a cluster
+	// whose pinned environment resolution installs packages gets the
+	// package-proxy allowance; every other cluster gets none.
+	clusterRuntimeEnv := ""
+	if spec.EnvironmentResolved != nil {
+		clusterRuntimeEnv = spec.EnvironmentResolved.RuntimeEnvYaml
+	}
+	if err := c.ensurePackageProxyEgress(ctx, string(id), clusterRuntimeEnv); err != nil {
+		return provision.ApplyResponse{}, err
 	}
 	manifest, err := provision.RayClusterForScheduled(id, spec, c.autoscaling, generation, queue, c.scheduling)
 	if err != nil {
