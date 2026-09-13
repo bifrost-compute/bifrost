@@ -208,6 +208,51 @@ working.
 
 Depends on: 3.
 
+*Landed (#57, 2026-09-13).* The catalog stays admin-only via
+`PUT /settings/policy` (user-submitted drafts remain deferred); the
+lifecycle discipline lives in `applyEnvironmentTransitions`
+(`internal/api/environments.go`), which the policy PUT runs on the
+`environments` section against the stored catalog — section-replace means
+transitions are computed by diffing old and new sections by name.
+Transition table as implemented:
+
+| from \ to | draft | published | deprecated | removed |
+|---|---|---|---|---|
+| (new) | ok | publish (stamped) | ok (retired outright) | — |
+| draft | edit; stale publish metadata cleared | publish (stamped) | 400 — remove the draft instead | ok |
+| published | 400 — no un-publishing; deprecate | edit; absent metadata falls back to the stored entry's | deprecate | ok |
+| deprecated | re-draft; publish metadata clears | 400 — go through draft again | edit | ok |
+
+A publish sets `published_by` from the caller's identity and `published_at`
+to now when absent; whatever the path, a stored published entry must carry
+both — one that still lacks them after the fill (a seeded entry echoed back
+without metadata, or a dev-mode edit with no caller identity) is a 400
+naming the entry, fixable by supplying the metadata explicitly. Removal is
+allowed at any status, mirroring the profile and storage sections:
+resolutions pinned on admitted specs are never retroactive, so removal
+harms nothing already running.
+
+Audit: the PUT emits the usual `update_policy` row plus one
+`publish_environment` / `deprecate_environment` allow row per environment
+whose lifecycle the edit moved (a deprecated-outright new entry is not a
+deprecation — nothing was published). The rows name actor, action and time;
+the durable per-environment attribution is the catalog entry's
+`published_by`/`published_at` — `core.AuditEvent`'s field set is fixed by
+the store schema (sqlite/postgres columns and the hash chain's canonical
+form), so no free-form detail field was added. `use_environment` stays
+implied: the submit path's `create_cluster`/`submit_job` audit rows (and
+`environment_rejected` denies) name the workload, and the pinned
+`EnvironmentResolved` on the stored spec names the environment durably —
+a separate per-use row would add a field the audit schema cannot carry
+cheaply.
+
+RBAC matrix: **publish/deprecate/edit** = admin only (policy-write
+permission, Admin on the cluster — pinned by
+`TestUpdatePolicyEnvironmentsAdminOnly` and the r03 `update_policy` row);
+**use** = anyone whose project the environment is open to
+(`environmentAvailableTo` at admission); **read the catalog** = any
+authenticated role, project-narrowed (`ListEnvironments`).
+
 ### Issue 7 — CVE/scan gate for environments
 
 As a security admin, I want an environment's packages and base image to carry

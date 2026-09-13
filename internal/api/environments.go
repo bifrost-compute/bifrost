@@ -126,6 +126,10 @@ func environmentsToWire(in []core.Environment) []EnvironmentSpec {
 // hatch passing the governed default validator; non-empty project and
 // env-var names; known status/scan-status values (the generated types are
 // plain strings, and the seed path never passes the validation middleware).
+// Lifecycle discipline — which status transitions an edit may perform and
+// how publishes are stamped — is applyEnvironmentTransitions (#57): it
+// needs the stored catalog and the caller's identity, which this function
+// deliberately does not.
 func environmentsFromWire(in []EnvironmentSpec) ([]core.Environment, error) {
 	out := make([]core.Environment, 0, len(in))
 	seen := make(map[string]bool, len(in))
@@ -207,6 +211,116 @@ func environmentsFromWire(in []EnvironmentSpec) ([]core.Environment, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// environmentLifecycleEvent is one lifecycle change an environments-section
+// edit performed (#57): UpdatePolicy emits one audit row per event after
+// the edit lands.
+type environmentLifecycleEvent struct {
+	action string // "publish_environment" | "deprecate_environment"
+	name   string
+}
+
+// applyEnvironmentTransitions enforces the environment lifecycle's
+// transition discipline (#57) on a section-replace edit, returning the
+// catalog to store and the lifecycle events to audit once the edit lands.
+// The PUT carries the whole catalog, so transitions are computed by
+// diffing the incoming section against the stored one by name:
+//
+//   - a NEW entry at draft or deprecated is accepted as-is (a catalog may
+//     record an entry as retired outright); at published it is an implicit
+//     publish — published_by is set from the caller's identity and
+//     published_at from now, each only when the entry leaves it absent.
+//   - draft -> draft: an edit; any stale publish metadata is cleared.
+//   - draft -> published: a publish (same fill as a new published entry).
+//   - draft -> deprecated: refused — remove a draft from the catalog
+//     instead; deprecation retires something that was published.
+//   - published -> published: an edit; publish metadata left absent falls
+//     back to the stored entry's (a whole-catalog edit need not echo it).
+//   - published -> draft: refused — there is no un-publishing; deprecate.
+//   - published -> deprecated: a deprecation; the publish metadata rides
+//     along as the record of who published it.
+//   - deprecated -> deprecated: an edit.
+//   - deprecated -> draft: the only way back; the publish metadata clears,
+//     so a later publish re-stamps it.
+//   - deprecated -> published: refused — go through draft again.
+//   - removal (a stored name absent from the incoming section): always
+//     allowed, mirroring the profile and storage sections — resolutions
+//     pinned on admitted specs are never retroactive, and the edit is
+//     covered by the update_policy audit row.
+//
+// Whatever the path, a stored published entry must carry published_by and
+// published_at; one that still lacks both after the fill is a 400 naming
+// the entry (reachable only from an unauthenticated dev-mode edit or a
+// seeded published entry echoed back without its metadata).
+func applyEnvironmentTransitions(old, incoming []core.Environment, publisher *string, now time.Time) ([]core.Environment, []environmentLifecycleEvent, error) {
+	byName := make(map[string]*core.Environment, len(old))
+	for i := range old {
+		byName[old[i].Name] = &old[i]
+	}
+	out := make([]core.Environment, len(incoming))
+	var events []environmentLifecycleEvent
+	for i := range incoming {
+		e := incoming[i]
+		prev := byName[e.Name]
+		from := core.EnvironmentStatusDraft
+		if prev != nil {
+			from = prev.Status.OrDefault()
+		}
+		switch e.Status.OrDefault() {
+		case core.EnvironmentStatusDraft:
+			if prev != nil && from == core.EnvironmentStatusPublished {
+				return nil, nil, badRequest(fmt.Sprintf("invalid environment %q: a published environment cannot return to draft; deprecate it instead", e.Name))
+			}
+			// New or edited draft, or a re-drafted deprecated entry: any
+			// publish metadata is stale.
+			e.PublishedBy, e.PublishedAt = nil, nil
+		case core.EnvironmentStatusDeprecated:
+			switch from {
+			case core.EnvironmentStatusDraft:
+				if prev != nil {
+					return nil, nil, badRequest(fmt.Sprintf("invalid environment %q: a draft cannot be deprecated; remove it from the catalog instead", e.Name))
+				}
+				// A new entry recorded as retired outright: allowed, and not
+				// a deprecation — nothing was ever published.
+			case core.EnvironmentStatusPublished:
+				events = append(events, environmentLifecycleEvent{action: "deprecate_environment", name: e.Name})
+			case core.EnvironmentStatusDeprecated:
+				// deprecated -> deprecated: an edit.
+			}
+		default: // published
+			if prev != nil && from == core.EnvironmentStatusDeprecated {
+				return nil, nil, badRequest(fmt.Sprintf("invalid environment %q: a deprecated environment cannot be republished directly; return it to draft and publish again", e.Name))
+			}
+			if prev == nil || from == core.EnvironmentStatusDraft {
+				// A publish: the caller is the publisher of record; an
+				// explicit published_at is kept, else now.
+				if publisher != nil {
+					p := *publisher
+					e.PublishedBy = &p
+				}
+				if e.PublishedAt == nil {
+					at := now
+					e.PublishedAt = &at
+				}
+				events = append(events, environmentLifecycleEvent{action: "publish_environment", name: e.Name})
+			} else {
+				// published -> published: metadata left absent keeps the
+				// stored entry's.
+				if e.PublishedBy == nil {
+					e.PublishedBy = prev.PublishedBy
+				}
+				if e.PublishedAt == nil {
+					e.PublishedAt = prev.PublishedAt
+				}
+			}
+			if e.PublishedBy == nil || e.PublishedAt == nil {
+				return nil, nil, badRequest(fmt.Sprintf("invalid environment %q: a published environment must carry published_by and published_at", e.Name))
+			}
+		}
+		out[i] = e
+	}
+	return out, events, nil
 }
 
 // environmentEscapeHatchDisjoint refuses the one ambiguity an environment
