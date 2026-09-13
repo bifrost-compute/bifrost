@@ -262,6 +262,10 @@ func cloneAdmission(m map[string]core.AdmissionRule) map[string]core.AdmissionRu
 	out := make(map[string]core.AdmissionRule, len(m))
 	for k, v := range m {
 		v.AllowedImages = cloneStringSlice(v.AllowedImages)
+		v.PackageDenylist = cloneStringSlice(v.PackageDenylist)
+		v.AllowedIndexHosts = cloneStringSlice(v.AllowedIndexHosts)
+		v.AllowedRemoteSchemes = cloneStringSlice(v.AllowedRemoteSchemes)
+		v.AllowedRemoteHosts = cloneStringSlice(v.AllowedRemoteHosts)
 		out[k] = v
 	}
 	return out
@@ -280,9 +284,32 @@ func cloneStorageEntries(es []core.StorageEntry) []core.StorageEntry {
 	return out
 }
 
+func cloneEnvironments(es []core.Environment) []core.Environment {
+	if es == nil {
+		return nil
+	}
+	out := make([]core.Environment, len(es))
+	for i, e := range es {
+		e.Description = clonePtr(e.Description)
+		e.Packages = cloneStringSlice(e.Packages)
+		e.EnvVars = cloneStringMap(e.EnvVars)
+		e.Projects = cloneStringSlice(e.Projects)
+		e.PublishedBy = clonePtr(e.PublishedBy)
+		e.PublishedAt = clonePtr(e.PublishedAt)
+		if e.Scan != nil {
+			scan := *e.Scan
+			scan.Scanner = clonePtr(scan.Scanner)
+			scan.ScannedAt = clonePtr(scan.ScannedAt)
+			e.Scan = &scan
+		}
+		out[i] = e
+	}
+	return out
+}
+
 // cloneStoredPolicy deep-copies a StoredPolicy's Prices/Quotas/Budgets
 // maps (Budgets nested one level further, into each StoredBudget's
-// Limits) and its Profiles/Admission/Storage catalogs.
+// Limits) and its Profiles/Admission/Storage/Environments catalogs.
 func cloneStoredPolicy(p StoredPolicy) StoredPolicy {
 	p.Prices = cloneFloatMap(p.Prices)
 	p.Quotas = cloneQuotas(p.Quotas)
@@ -290,6 +317,7 @@ func cloneStoredPolicy(p StoredPolicy) StoredPolicy {
 	p.Profiles = cloneProfiles(p.Profiles)
 	p.Admission = cloneAdmission(p.Admission)
 	p.Storage = cloneStorageEntries(p.Storage)
+	p.Environments = cloneEnvironments(p.Environments)
 	return p
 }
 

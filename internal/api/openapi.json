@@ -2,8 +2,24 @@
   "components": {
     "schemas": {
       "AdmissionRule": {
-        "description": "Per-project admission limits (#7). Both fields optional; a zero value means unrestricted. Keyed by project (or `\"*\"` for every project) in `PolicyView.admission`.",
+        "description": "Per-project admission limits (#7), plus the runtime-env governance knobs (#52) PR #74 hardcoded into the validator \u2014 carried here so they are API-editable. All fields optional; a zero value means unrestricted / the governed default. Keyed by project (or `\"*\"` for every project) in `PolicyView.admission`.",
         "properties": {
+          "allow_conda": {
+            "description": "Permit the runtime_env conda field (an environment file whose channels the control plane cannot audit); false = denied (#53).",
+            "type": "boolean"
+          },
+          "allow_image_uri": {
+            "description": "Permit the runtime_env image_uri field (an arbitrary per-worker container image, bypassing allowed_images); false = denied (#53).",
+            "type": "boolean"
+          },
+          "allow_py_executable": {
+            "description": "Permit the runtime_env py_executable field (an interpreter binary the platform cannot attest); false = denied (#53).",
+            "type": "boolean"
+          },
+          "allow_unpinned_packages": {
+            "description": "Permit pip entries not pinned to an exact version; false = name==version required (#53).",
+            "type": "boolean"
+          },
           "allowed_images": {
             "description": "Container images a cluster/job in the project may use; empty = any image.",
             "items": {
@@ -11,11 +27,51 @@
             },
             "type": "array"
           },
+          "allowed_index_hosts": {
+            "description": "Hosts trusted as package indexes: pip_install_options may redirect --index-url/--extra-index-url/--find-links only to one of these; empty = no index redirection at all (#53).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allowed_remote_hosts": {
+            "description": "Hosts remote working_dir/py_modules URIs may point at (with allowed_remote_schemes); empty = local uploads only (#53).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allowed_remote_schemes": {
+            "description": "URI schemes remote working_dir/py_modules may use (with allowed_remote_hosts); empty = local uploads only (#53).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_document_bytes": {
+            "description": "Cap on the raw runtime_env_yaml document size; 0 = the platform default (64 KiB) (#53).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_setup_timeout_seconds": {
+            "description": "Cap on runtime_env config.setup_timeout_seconds; 0 = the platform default (600) (#53).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_workers": {
             "description": "Maximum total worker replicas across all worker groups; 0 = unlimited.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "package_denylist": {
+            "description": "PyPI-normalized package names (PEP 503) that must never install, pinned or not (#53).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -645,6 +701,13 @@
             "$ref": "#/components/schemas/Engine",
             "description": "Which compute engine backs this cluster. `#[serde(default)]` = Ray, so\nevery pre-multi-engine spec and every Ray client keeps working\nuntouched."
           },
+          "environment": {
+            "description": "Environment catalog name (#52) whose image, packages and env vars this cluster runs with; `null` = none. Accepted and stored; resolution arrives with the catalog issue.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "head_cpu": {
             "type": "string"
           },
@@ -951,6 +1014,126 @@
           "dask"
         ],
         "type": "string"
+      },
+      "EnvironmentSpec": {
+        "description": "A named, governed compute environment in the environment catalog (#52): the base image, pinned packages and env vars a job or cluster gets when its spec names this environment (`RayJobSpec.environment`, `ClusterSpec.environment`). Environments compile to a governed runtime_env (#53); `runtime_env_yaml` is the documented escape hatch. Inert in #52: references are accepted and stored, resolution arrives with the catalog issue.",
+        "properties": {
+          "base_image": {
+            "description": "Container image the environment builds on; admission image allowlists apply to it as to any spec image.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Human-readable summary shown by clients.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env_vars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Environment variables every workload using this environment runs with; empty = none.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "name": {
+            "description": "Catalog name a spec refers to (an RFC 1123 label, so it can ride Kubernetes object names).",
+            "maxLength": 63,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "type": "string"
+          },
+          "packages": {
+            "description": "Pip requirements, each pinned to an exact version (`name[extras]==version`) \u2014 the same pin rule the runtime_env governance validator (#53) enforces. Empty = the base image alone.",
+            "items": {
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(\\[[A-Za-z0-9_,.-]+\\])?==[A-Za-z0-9][A-Za-z0-9.!+_-]*$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "projects": {
+            "description": "Projects that may use this environment; empty = every project.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "published_at": {
+            "description": "When the environment was published; `null` while in draft.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "published_by": {
+            "description": "The identity that published the environment; `null` while in draft.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_env_yaml": {
+            "description": "Escape hatch: an extra Ray runtime_env YAML document merged in at resolution time, governed by the same validator (#53) a job's own runtime_env_yaml passes. Empty = none.",
+            "type": "string"
+          },
+          "scan": {
+            "$ref": "#/components/schemas/EnvironmentScan",
+            "description": "The scan verdict recorded for this environment; `null` = never scanned.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "Lifecycle state: a draft is editable and not yet selectable, published is selectable by specs, deprecated stays resolvable for existing references but should not be picked for new work. Absent = draft.",
+            "enum": [
+              "draft",
+              "published",
+              "deprecated"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "EnvironmentScan": {
+        "description": "The recorded vulnerability-scan verdict for an environment (#52): an administrator records the outcome of the offline scan workflow (trivy/grype on the base image, pip-audit on the package list) here; the control plane does not scan itself.",
+        "properties": {
+          "status": {
+            "description": "The verdict: clean | failed | pending.",
+            "enum": [
+              "clean",
+              "failed",
+              "pending"
+            ],
+            "type": "string"
+          },
+          "scanned_at": {
+            "description": "When the scan ran.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scanner": {
+            "description": "What produced the verdict (e.g. \"trivy 0.57.0\", \"pip-audit 2.7\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
       },
       "FlavorSpec": {
         "description": "A hardware flavor within a pool: node selection plus per-resource\nnominal quota (K8s quantity strings, e.g. \"4\", \"512Gi\").",
@@ -1300,6 +1483,13 @@
           "editable": {
             "description": "Always true in v1 \u2014 the policy is editable via PUT.",
             "type": "boolean"
+          },
+          "environments": {
+            "description": "The environment catalog (#52); empty when none are configured.",
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentSpec"
+            },
+            "type": "array"
           },
           "prices": {
             "additionalProperties": {
@@ -1706,6 +1896,13 @@
           "entrypoint": {
             "description": "The shell command Ray runs as the job (e.g. `python train.py`).",
             "type": "string"
+          },
+          "environment": {
+            "description": "Environment catalog name (#52) whose image, packages and env vars this job runs with; `null` = none. Accepted and stored; resolution arrives with the catalog issue.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "head_cpu": {
             "description": "Head CPU request; default \"1\" when empty.",
@@ -2216,7 +2413,7 @@
             ]
           },
           "mode": {
-            "description": "How the source reaches the pods: `env` injects every Secret key as an environment variable (secret source only); `file` mounts the source at `mount_path` — read-only for a Secret (credentials), read-write for a PersistentVolumeClaim (a data volume).",
+            "description": "How the source reaches the pods: `env` injects every Secret key as an environment variable (secret source only); `file` mounts the source at `mount_path` \u2014 read-only for a Secret (credentials), read-write for a PersistentVolumeClaim (a data volume).",
             "enum": [
               "env",
               "file"
@@ -2328,6 +2525,16 @@
             },
             "type": [
               "object",
+              "null"
+            ]
+          },
+          "environments": {
+            "description": "Present replaces the whole environment catalog (`[]` clears it) (#52).",
+            "items": {
+              "$ref": "#/components/schemas/EnvironmentSpec"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },
@@ -3945,6 +4152,40 @@
         ]
       }
     },
+    "/api/v1/environments": {
+      "get": {
+        "operationId": "list_environments",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/EnvironmentSpec"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The environment catalog, filtered to the environments the caller's projects may use"
+          },
+          "401": {
+            "description": "No/invalid token"
+          },
+          "403": {
+            "description": "Missing Read on cluster"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "environments"
+        ]
+      }
+    },
     "/api/v1/identity": {
       "get": {
         "operationId": "identity",
@@ -5012,6 +5253,10 @@
     {
       "description": "The profile catalog (#7): named cluster shapes an administrator maintains in the policy (`PUT /settings/policy`), listed here filtered to the caller's projects. Reads need Read on the cluster target.",
       "name": "profiles"
+    },
+    {
+      "description": "Governed environment catalog (#52): named base-image + pinned-package sets specs reference by name. Reads mirror the profile catalog's; the catalog itself rides the policy document.",
+      "name": "environments"
     }
   ]
 }

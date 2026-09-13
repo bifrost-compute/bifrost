@@ -273,6 +273,37 @@ type AdmissionRule struct {
 	// MaxWorkers is the maximum total worker replicas across all worker
 	// groups; 0 = unlimited.
 	MaxWorkers uint32 `json:"max_workers"`
+
+	// The runtime-env governance knobs (#52) the #53 validator
+	// (api.RuntimeEnvPolicy) hardcoded, carried here so they are
+	// API-editable per project. All zero values keep the governed
+	// defaults; the validator does not read them yet — that wiring is
+	// the environment catalog issue (#54).
+	// AllowPyExecutable permits the py_executable field. Default deny.
+	AllowPyExecutable bool `json:"allow_py_executable,omitempty"`
+	// AllowImageURI permits the image_uri field. Default deny.
+	AllowImageURI bool `json:"allow_image_uri,omitempty"`
+	// AllowConda permits the conda field. Default deny.
+	AllowConda bool `json:"allow_conda,omitempty"`
+	// AllowUnpinnedPackages permits pip entries not pinned to an exact
+	// version. Default deny.
+	AllowUnpinnedPackages bool `json:"allow_unpinned_packages,omitempty"`
+	// PackageDenylist holds PyPI-normalized package names (PEP 503) that
+	// must never install, pinned or not.
+	PackageDenylist []string `json:"package_denylist,omitempty"`
+	// AllowedIndexHosts are the hosts pip_install_options may redirect
+	// package indexes to; empty = no index redirection at all.
+	AllowedIndexHosts []string `json:"allowed_index_hosts,omitempty"`
+	// AllowedRemoteSchemes and AllowedRemoteHosts together permit remote
+	// working_dir/py_modules URIs; both empty = local uploads only.
+	AllowedRemoteSchemes []string `json:"allowed_remote_schemes,omitempty"`
+	AllowedRemoteHosts   []string `json:"allowed_remote_hosts,omitempty"`
+	// MaxSetupTimeoutSeconds caps config.setup_timeout_seconds; 0 = the
+	// platform default.
+	MaxSetupTimeoutSeconds int64 `json:"max_setup_timeout_seconds,omitempty"`
+	// MaxDocumentBytes caps the raw runtime_env_yaml document size; 0 =
+	// the platform default.
+	MaxDocumentBytes int64 `json:"max_document_bytes,omitempty"`
 }
 
 // admissionRuleAlias breaks the recursion MarshalJSON would otherwise

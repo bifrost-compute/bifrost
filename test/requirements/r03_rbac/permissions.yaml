@@ -33,6 +33,8 @@ operations:
   delete_job:       {admin: allow, operator: deny,  dev-a: scoped, dev-b: scoped}
   # --- profiles (the catalog is read like usage/metrics: Read on cluster, any authenticated role)
   list_profiles:    {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
+  # --- environments (#52: same read rule as the profile catalog)
+  list_environments: {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
   # --- services (target Service: developer full, operator read)
   list_services:    {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
   deploy_service:   {admin: allow, operator: deny,  dev-a: scoped, dev-b: scoped}

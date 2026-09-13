@@ -6,13 +6,13 @@
 // parses the submitted YAML at admission time and enforces the platform's
 // rule set before the spec is ever persisted.
 //
-// Where the knobs live: the frozen wire contract's AdmissionRule carries
-// only allowed_images/max_workers with no extension point (an unknown key
-// would be silently dropped by the generated decoder), so the rule set is
-// NOT API-editable yet — the defaults below are the policy, the serve
-// flag --allow-ungoverned-runtime-env is the upgrader escape hatch, and
-// RuntimeEnvPolicy's fields are the seam the governed-environments epic's
-// later issues wire to a real policy surface.
+// Where the knobs live: the contract's AdmissionRule gained the
+// RuntimeEnvPolicy field set with the environment contract (#52), so the
+// rule set rides the policy row and is API-editable as data — but this
+// validator still applies the governed defaults below; the per-project
+// wiring from admission rule to validator is the environment catalog
+// issue (#54). The serve flag --allow-ungoverned-runtime-env remains the
+// upgrader escape hatch.
 package api
 
 import (

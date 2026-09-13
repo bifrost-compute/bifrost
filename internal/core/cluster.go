@@ -133,6 +133,10 @@ type ClusterSpec struct {
 	// Profile is the profile catalog name (#7) whose shape fills this
 	// spec's zero-valued shape fields at admission; nil = none.
 	Profile *string `json:"profile"`
+	// Environment is the environment catalog name (#52) whose image,
+	// packages and env vars this cluster runs with; nil = none. Accepted
+	// and stored; resolution arrives with the catalog issue.
+	Environment *string `json:"environment"`
 	// Storage names storage catalog entries (#12) delivered to the
 	// cluster's pods. Names only — the catalog is resolved server-side
 	// into StorageResolved.
