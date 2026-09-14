@@ -37,13 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: go
 
       # CodeQL's Go extractor observes a real build to know what is in the
       # module. autobuild runs `go build ./...`, which matches this repo's
       # no-cgo posture (ci.yml builds CGO_ENABLED=0) and needs no overrides.
-      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/autobuild@v4
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
