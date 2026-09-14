@@ -203,7 +203,7 @@ jobs:
           artifact-name: sbom-bifrost.spdx.json
 
       - name: Build-provenance attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/bifrost
           subject-digest: ${{ steps.img.outputs.digest }}
@@ -311,7 +311,7 @@ jobs:
           artifact-name: sbom-bifrost-test.spdx.json
 
       - name: Build-provenance attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/bifrost-test
           subject-digest: ${{ steps.img.outputs.digest }}
