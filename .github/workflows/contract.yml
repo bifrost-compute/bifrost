@@ -42,7 +42,7 @@ jobs:
         # committed literal.
         run: echo "RAY_CONTRACT_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
       - uses: actions/setup-python@v7
         with:

@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
       - name: fuzz smoke (30s per target, race on)
         run: |
@@ -85,7 +85,7 @@ jobs:
       GOCACHE: ${{ github.workspace }}/.gocache
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
       - id: slug
         run: echo "name=$(echo '${{ matrix.target }}' | tr '/:' '--')" >> "$GITHUB_OUTPUT"
