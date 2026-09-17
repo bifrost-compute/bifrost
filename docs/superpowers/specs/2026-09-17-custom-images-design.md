@@ -50,11 +50,34 @@ of record and the scanner.*
   anonymous or with basic credentials; loopback registries over plain HTTP;
   5 minute cache). `ImageInspect` is the shared JSON shape of §4.1 minus the
   `security` and `bifrost` blocks.
-- **Not shipped:** pull secrets on pods (D7), digest resolution at save
-  (D3), Artifact Keeper scan summary and webhook (§4.2/§4.3), registry-host
-  SSRF screening for inspect (the catalog is admin-only; the gateway
-  registry's screening in `internal/core/registry.go` is the model to
-  reuse), the console (IMG-C).
+- **Not shipped in bifrost:** pull secrets on pods (D7), digest resolution
+  at save (D3), Artifact Keeper scan summary and webhook (§4.2/§4.3),
+  registry-host SSRF screening for inspect (the catalog is admin-only; the
+  gateway registry's screening in `internal/core/registry.go` is the model
+  to reuse). The console half (IMG-C) shipped in bifrost-ui the same day:
+  Images page, inspect dialog, approved-image picker, catalog and
+  environments editors, submit-job form.
+- **The builder moved to Artifact Keeper (2026-09-17, branches
+  `feat/image-builder` in artifact-keeper and artifact-keeper-web).** The
+  spike on grace settled both unknowns: rootless BuildKit v0.33 runs on the
+  microk8s node with only seccomp/AppArmor unconfined on its own container
+  (no privileged flag, despite Ubuntu's unprivileged-userns restriction),
+  and it pushes into an Artifact Keeper Docker repository (`ray`, created
+  for this) with a SLSA v1 provenance attestation whose `mode=max` payload
+  embeds the Dockerfile at
+  `predicate.runDetails.metadata.buildkit_metadata.source.infos[].data`.
+  What the branches add: `GET /repositories/{key}/image-inspect` (the §4.1
+  document read from the registry's own storage, plus the real Dockerfile
+  from provenance), `/repositories/{key}/image-builds` (structured spec →
+  deterministic Containerfile → `buildctl` against `AK_BUILDKIT_ADDR` →
+  push as the requesting user via a short-lived API token, with
+  `attest:provenance=mode=max`), and in the console a Build tab with a New
+  image wizard whose Containerfile preview is the server's dry run, plus an
+  Image tab on every manifest. The builder is a client of buildkitd, not a
+  sidecar: buildkitd is its own Deployment (`~/deploy/buildkitd.yaml` on
+  grace, namespace `image-builder`) and the backend only ships `buildctl`.
+  Bifrost's remaining piece is the webhook that turns a pushed build into a
+  catalog entry (§4.2 item 5).
 
 ## 1. Load-bearing facts (verified in code and on grace)
 
