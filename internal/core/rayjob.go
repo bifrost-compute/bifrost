@@ -58,6 +58,12 @@ type RayJobSpec struct {
 	// the catalog at admission time (never retroactive). Persisted, never
 	// echoed: RayJobView carries no spec.
 	StorageResolved []ResolvedStorage `json:"storage_resolved,omitempty"`
+	// ServiceAccountResolved is the Kubernetes ServiceAccount the workload's
+	// pods run under (#20), resolved from the policy's workload_identity
+	// rules for the project at admission and persisted so a later rule
+	// edit is never retroactive. nil = the namespace default (no rule).
+	// Never echoed: views carry no spec.
+	ServiceAccountResolved *string `json:"service_account_resolved,omitempty"`
 	// TtlSecondsAfterFinished is how long the finished job's cluster is
 	// kept before the backend deletes it; nil = DefaultRayJobTtlSecondsAfterFinished.
 	TtlSecondsAfterFinished *uint32 `json:"ttl_seconds_after_finished"`

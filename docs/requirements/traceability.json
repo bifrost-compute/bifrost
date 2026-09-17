@@ -423,6 +423,29 @@
       "skip_reasons": [
         "target inproc has no Kubernetes"
       ]
+    },
+    {
+      "n": 20,
+      "title": "Workloads run under a per-project Kubernetes identity (cloud IAM binding, no static credentials)",
+      "priority": "HIGH",
+      "tests": 6,
+      "passed": 4,
+      "failed": 0,
+      "skipped": 2,
+      "not_yet_built": 0,
+      "status": "partial",
+      "test_names": [
+        "TestIdentityIsPinnedPerKindAtAdmission",
+        "TestPodsRunUnderTheProjectServiceAccount",
+        "TestRayJobClusterAndSubmitterCarryTheJobIdentity",
+        "TestRuleEditIsNeverRetroactive",
+        "TestUnboundProjectKeepsTheNamespaceDefault",
+        "TestWorkloadIdentitySectionValidatesAndReplaces"
+      ],
+      "skip_reasons": [
+        "target inproc has no Kubernetes",
+        "target inproc has no Kubernetes"
+      ]
     }
   ]
 }

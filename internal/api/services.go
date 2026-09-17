@@ -233,6 +233,11 @@ func (s *Server) DeployService(ctx context.Context, req DeployServiceRequestObje
 	if spec.StorageResolved, err = s.resolveStorage(ctx, spec.Project, spec.Storage); err != nil {
 		return nil, err
 	}
+	// Workload identity (#20): the ServiceAccount the project's Serve
+	// deployments run under, pinned at admission like storage.
+	if spec.ServiceAccountResolved, err = s.resolveWorkloadIdentity(ctx, spec.Project, core.WorkloadServing); err != nil {
+		return nil, err
+	}
 
 	// One service per project (requirement 2, plan ruling D8): a project
 	// shares a single RayService, so a second name in the same project is

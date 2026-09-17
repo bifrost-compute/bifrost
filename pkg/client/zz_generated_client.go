@@ -1069,6 +1069,9 @@ type PolicyView struct {
 
 	// Storage The storage catalog (#12); empty when none are configured.
 	Storage *[]StorageEntry `json:"storage,omitempty"`
+
+	// WorkloadIdentity project (or `"*"`) → workload identity (#20). Empty when none are configured.
+	WorkloadIdentity *map[string]WorkloadIdentityRule `json:"workload_identity,omitempty"`
 }
 
 // PoolPurpose What a pool's capacity is for (#4). `compute` (the default when absent) admits interactive clusters and jobs; `serving` admits only RayService-backed services, so long-lived serving replicas never compete with notebooks for the same queue.
@@ -1484,6 +1487,9 @@ type UpdatePolicy struct {
 
 	// Storage Present replaces the whole storage catalog (`[]` clears it) (#12).
 	Storage *[]StorageEntry `json:"storage,omitempty"`
+
+	// WorkloadIdentity Present replaces the whole workload_identity map (`{}` clears it) (#20). Never retroactive: workloads already admitted keep the ServiceAccount they were admitted with.
+	WorkloadIdentity *map[string]WorkloadIdentityRule `json:"workload_identity,omitempty"`
 }
 
 // UpdateUserRequest defines model for UpdateUserRequest.
@@ -1575,6 +1581,21 @@ type WorkerGroupNodes struct {
 
 	// Ready Ready replicas: pods in this group that are `Running` and `Ready`.
 	Ready int32 `json:"ready"`
+}
+
+// WorkloadIdentityRule Per-project workload identity (#20): the Kubernetes ServiceAccount the pods of a project's clusters, jobs and services run under. Keyed by project (or `"*"` for every project) in `PolicyView.workload_identity`. This is the seam a cloud IAM binding attaches to (EKS Pod Identity / IRSA, GKE Workload Identity): the platform binds a role to the ServiceAccount, Bifrost only names it on every pod template it renders, and the pods obtain credentials from the node's identity agent — no static credentials. Every field optional; a kind-specific field wins for its kind, an empty one falls back to `service_account`, and an empty `service_account` keeps the namespace default. The ServiceAccount must already exist in the workload namespace; the apply fails with a readable condition when it does not. Resolved at admission and pinned on the spec, so a later edit never reaches a running workload.
+type WorkloadIdentityRule struct {
+	// InteractiveServiceAccount Overrides `service_account` for self-serve clusters (requirement 6).
+	InteractiveServiceAccount *string `json:"interactive_service_account,omitempty"`
+
+	// JobServiceAccount Overrides `service_account` for ephemeral RayJobs (requirement 5): the job's cluster pods and its submitter pod.
+	JobServiceAccount *string `json:"job_service_account,omitempty"`
+
+	// ServiceAccount Default ServiceAccount for every workload kind (RFC 1123 subdomain, an existing ServiceAccount in the workload namespace); empty = the namespace default.
+	ServiceAccount *string `json:"service_account,omitempty"`
+
+	// ServingServiceAccount Overrides `service_account` for RayServices (requirements 1, 2, 4).
+	ServingServiceAccount *string `json:"serving_service_account,omitempty"`
 }
 
 // DeleteAssignmentParams defines parameters for DeleteAssignment.

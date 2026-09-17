@@ -44,6 +44,11 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, create, delete]
+  # ServiceAccounts: requirement 20 creates a tenant ServiceAccount, binds a
+  # workload-identity rule to it and asserts the pods run under it.
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get, list, create, delete]
   # NetworkPolicies: the per-owner isolation the provisioner writes, and the
   # deny-all a CNI check installs and removes.
   - apiGroups: [networking.k8s.io]
@@ -90,6 +95,9 @@ rules:
     verbs: [get]
   - apiGroups: [""]
     resources: [secrets]
+    verbs: [list, delete]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
     verbs: [list, delete]
   # `create` as well as the sweep: the CNI precondition test installs a
   # deny-all policy here and takes it away again, because an isolation result

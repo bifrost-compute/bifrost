@@ -301,6 +301,34 @@ func ensureStorageSourcesExist(ctx context.Context, c client.Client, namespace s
 	return nil
 }
 
+// ensureServiceAccountExists fails fast when the ServiceAccount a spec's
+// workload identity (#20) names is missing from the workload namespace, so
+// the workload surfaces a readable condition instead of pods that the
+// kubelet refuses to create (a pod naming a missing ServiceAccount stays
+// in ContainerCreating with "serviceaccount not found"). Metadata only,
+// like the storage check: Bifrost never reads the account's tokens or
+// binds anything to it — the platform owns the account and its cloud IAM
+// binding. nil names nothing (the namespace default) and passes.
+func (c *Client) ensureServiceAccountExists(ctx context.Context, serviceAccount *string) error {
+	return ensureServiceAccountExists(ctx, c.c, c.namespace, serviceAccount)
+}
+
+func ensureServiceAccountExists(ctx context.Context, c client.Client, namespace string, serviceAccount *string) error {
+	if serviceAccount == nil || *serviceAccount == "" {
+		return nil
+	}
+	meta := &metav1.PartialObjectMetadata{}
+	meta.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ServiceAccount"))
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: *serviceAccount}, meta); err != nil {
+		if apierrors.IsNotFound(err) {
+			return provision.ProvisionError{Kind: provision.ProvisionErrBackend,
+				Message: fmt.Sprintf("ServiceAccount %q not found in namespace %s (workload identity)", *serviceAccount, namespace)}
+		}
+		return wrapErr(err)
+	}
+	return nil
+}
+
 // deleteClusterAllow deletes the per-cluster allow policy for id, plus the
 // per-workload egress policies a cluster may have carried (autoscaler,
 // package proxy). Idempotent: already-gone is success. Ported from
@@ -471,6 +499,9 @@ func (c *Client) Apply(ctx context.Context, id core.ClusterId, spec *core.Cluste
 		return provision.ApplyResponse{}, err
 	}
 	if err := c.ensureStorageSourcesExist(ctx, spec.StorageResolved); err != nil {
+		return provision.ApplyResponse{}, err
+	}
+	if err := c.ensureServiceAccountExists(ctx, spec.ServiceAccountResolved); err != nil {
 		return provision.ApplyResponse{}, err
 	}
 	// The same rule RayClusterFor applies (provision.EffectiveAutoscaling):
@@ -709,6 +740,9 @@ func (s *ServiceClient) Deploy(ctx context.Context, name string, spec *core.Serv
 		return err
 	}
 	if err := s.ensureStorageSourcesExist(ctx, spec.StorageResolved); err != nil {
+		return err
+	}
+	if err := s.ensureServiceAccountExists(ctx, spec.ServiceAccountResolved); err != nil {
 		return err
 	}
 	// queue is the project's serving LocalQueue (requirement 4), resolved

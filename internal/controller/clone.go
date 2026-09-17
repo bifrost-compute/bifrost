@@ -319,7 +319,21 @@ func cloneStoredPolicy(p StoredPolicy) StoredPolicy {
 	p.Storage = cloneStorageEntries(p.Storage)
 	p.Environments = cloneEnvironments(p.Environments)
 	p.Images = cloneImageEntries(p.Images)
+	p.WorkloadIdentity = cloneWorkloadIdentity(p.WorkloadIdentity)
 	return p
+}
+
+// cloneWorkloadIdentity copies the workload-identity map (#20); its
+// values are plain strings, so a shallow map copy is a deep copy.
+func cloneWorkloadIdentity(in map[string]core.WorkloadIdentityRule) map[string]core.WorkloadIdentityRule {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]core.WorkloadIdentityRule, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func cloneImageEntries(in []core.ImageEntry) []core.ImageEntry {

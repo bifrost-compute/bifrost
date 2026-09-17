@@ -76,6 +76,12 @@ type ServiceSpec struct {
 	// the catalog at admission time (never retroactive). Persisted, never
 	// echoed: ServiceView carries no spec.
 	StorageResolved []ResolvedStorage `json:"storage_resolved,omitempty"`
+	// ServiceAccountResolved is the Kubernetes ServiceAccount the workload's
+	// pods run under (#20), resolved from the policy's workload_identity
+	// rules for the project at admission and persisted so a later rule
+	// edit is never retroactive. nil = the namespace default (no rule).
+	// Never echoed: views carry no spec.
+	ServiceAccountResolved *string `json:"service_account_resolved,omitempty"`
 }
 
 // serviceSpecAlias breaks the recursion Unmarshal/MarshalJSON would

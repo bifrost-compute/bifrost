@@ -545,6 +545,10 @@ type StoredPolicy struct {
 	// Images is the approved-image catalog (requirements 7/10): vetted
 	// image references with their engine/Ray version. Empty = none.
 	Images []core.ImageEntry `json:"images"`
+	// WorkloadIdentity maps project (or "*" for every project) -> the
+	// ServiceAccount its workloads run under (#20). Empty = every pod
+	// keeps the namespace default.
+	WorkloadIdentity map[string]core.WorkloadIdentityRule `json:"workload_identity,omitempty"`
 }
 
 // storedPolicyAlias breaks the recursion MarshalJSON would otherwise cause

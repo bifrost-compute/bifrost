@@ -208,6 +208,77 @@ type ResolvedStorage struct {
 	MountPath  *string       `json:"mount_path"`
 }
 
+// --- Workload identity (#20) ---
+
+// WorkloadKind is which of the three Ray submission paths a pod template
+// belongs to. The workload-identity rule may name a distinct
+// ServiceAccount per kind, because the cloud IAM role an interactive
+// notebook cluster needs (read datasets) is rarely the one a batch job
+// (write results) or a Serve deployment (read models, serve) needs.
+type WorkloadKind string
+
+const (
+	// WorkloadInteractive is a self-serve RayCluster (requirement 6).
+	WorkloadInteractive WorkloadKind = "interactive"
+	// WorkloadJob is an ephemeral RayJob and its submitter (requirement 5).
+	WorkloadJob WorkloadKind = "job"
+	// WorkloadServing is a group RayService (requirements 1, 2, 4).
+	WorkloadServing WorkloadKind = "serving"
+)
+
+// WorkloadIdentityRule is the per-project workload identity (#20): the
+// Kubernetes ServiceAccount the pods of a project's clusters, jobs and
+// services run under. Keyed by project (or "*" for every project) in the
+// policy row, exactly like AdmissionRule.
+//
+// This is the seam a cloud IAM binding attaches to (EKS Pod Identity /
+// IRSA, GKE Workload Identity, Azure workload identity): the platform
+// binds an IAM role to the ServiceAccount, Bifrost only names it, and the
+// pods obtain cloud credentials from the node's identity agent — no static
+// credentials on the pod, none in the storage catalog, none through
+// Bifrost. Submission identity (who asked — the audit row's subject) and
+// workload identity (what the pods may reach) stay two separate decisions.
+//
+// Every field is optional. A kind-specific field wins for its kind; an
+// empty one falls back to ServiceAccount; an empty ServiceAccount means
+// the pods keep the namespace default (today's behaviour).
+type WorkloadIdentityRule struct {
+	// ServiceAccount is the default for every workload kind.
+	ServiceAccount string `json:"service_account,omitempty"`
+	// InteractiveServiceAccount overrides ServiceAccount for self-serve
+	// clusters.
+	InteractiveServiceAccount string `json:"interactive_service_account,omitempty"`
+	// JobServiceAccount overrides ServiceAccount for ephemeral RayJobs
+	// (the job's cluster pods AND its submitter pod).
+	JobServiceAccount string `json:"job_service_account,omitempty"`
+	// ServingServiceAccount overrides ServiceAccount for RayServices.
+	ServingServiceAccount string `json:"serving_service_account,omitempty"`
+}
+
+// For returns the ServiceAccount the rule names for kind: the
+// kind-specific field when set, else the default; "" when the rule has
+// nothing to say for that kind.
+func (r WorkloadIdentityRule) For(kind WorkloadKind) string {
+	var specific string
+	switch kind {
+	case WorkloadInteractive:
+		specific = r.InteractiveServiceAccount
+	case WorkloadJob:
+		specific = r.JobServiceAccount
+	case WorkloadServing:
+		specific = r.ServingServiceAccount
+	}
+	if specific != "" {
+		return specific
+	}
+	return r.ServiceAccount
+}
+
+// IsZero reports whether the rule names nothing at all.
+func (r WorkloadIdentityRule) IsZero() bool {
+	return r == WorkloadIdentityRule{}
+}
+
 // --- Profile catalog and admission (#7) ---
 
 // Profile is a named cluster shape in the profile catalog: the head/worker

@@ -1805,6 +1805,16 @@
               "$ref": "#/components/schemas/StorageEntry"
             },
             "type": "array"
+          },
+          "workload_identity": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WorkloadIdentityRule"
+            },
+            "description": "project (or `\"*\"`) \u2192 workload identity (#20). Empty when none are configured.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
           }
         },
         "required": [
@@ -2887,6 +2897,19 @@
               "array",
               "null"
             ]
+          },
+          "workload_identity": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WorkloadIdentityRule"
+            },
+            "description": "Present replaces the whole workload_identity map (`{}` clears it) (#20). Never retroactive: workloads already admitted keep the ServiceAccount they were admitted with.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -3118,6 +3141,28 @@
           "ready",
           "nodes"
         ],
+        "type": "object"
+      },
+      "WorkloadIdentityRule": {
+        "description": "Per-project workload identity (#20): the Kubernetes ServiceAccount the pods of a project's clusters, jobs and services run under. Keyed by project (or `\"*\"` for every project) in `PolicyView.workload_identity`. This is the seam a cloud IAM binding attaches to (EKS Pod Identity / IRSA, GKE Workload Identity): the platform binds a role to the ServiceAccount, Bifrost only names it on every pod template it renders, and the pods obtain credentials from the node's identity agent \u2014 no static credentials. Every field optional; a kind-specific field wins for its kind, an empty one falls back to `service_account`, and an empty `service_account` keeps the namespace default. The ServiceAccount must already exist in the workload namespace; the apply fails with a readable condition when it does not. Resolved at admission and pinned on the spec, so a later edit never reaches a running workload.",
+        "properties": {
+          "service_account": {
+            "description": "Default ServiceAccount for every workload kind (RFC 1123 subdomain, an existing ServiceAccount in the workload namespace); empty = the namespace default.",
+            "type": "string"
+          },
+          "interactive_service_account": {
+            "description": "Overrides `service_account` for self-serve clusters (requirement 6).",
+            "type": "string"
+          },
+          "job_service_account": {
+            "description": "Overrides `service_account` for ephemeral RayJobs (requirement 5): the job's cluster pods and its submitter pod.",
+            "type": "string"
+          },
+          "serving_service_account": {
+            "description": "Overrides `service_account` for RayServices (requirements 1, 2, 4).",
+            "type": "string"
+          }
+        },
         "type": "object"
       }
     },

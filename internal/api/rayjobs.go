@@ -211,6 +211,14 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 		return "storage_rejected", serr
 	}
 	spec.StorageResolved = resolved
+	// Workload identity (#20): the ServiceAccount the project's jobs run
+	// under — the job's cluster pods and its submitter alike — pinned at
+	// admission like storage.
+	sa, werr := s.resolveWorkloadIdentity(ctx, view.Project, core.WorkloadJob)
+	if werr != nil {
+		return "", werr
+	}
+	spec.ServiceAccountResolved = sa
 	spec.EnvironmentResolved = envResolved
 	spec.Image, spec.RayVersion = view.Image, view.RayVersion
 	spec.HeadCpu, spec.HeadMemory = view.HeadCpu, view.HeadMemory

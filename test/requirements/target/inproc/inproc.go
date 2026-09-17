@@ -293,6 +293,43 @@ func (tg *target) JobRuntimeEnv(id string) (string, bool) {
 	return j.Spec.RuntimeEnvYaml, true
 }
 
+// ResolvedServiceAccount returns the workload identity (#20) the named
+// cluster, job or service was admitted with — the ServiceAccount the fake
+// provisioner would stamp on every pod template — and whether it resolved
+// to one at all (false = the namespace default). kind is "cluster", "job"
+// or "service". Requirement tests read the pinned identity through this
+// seam because the contract never echoes a spec (guards rule 1 keeps
+// internal/ out of the test packages); a cluster target answers the same
+// question from the pods' serviceAccountName.
+func (tg *target) ResolvedServiceAccount(kind, id string) (string, bool) {
+	ctx := context.Background()
+	var sa *string
+	switch kind {
+	case "cluster":
+		c, err := tg.store.Get(ctx, core.ClusterId(id))
+		if err != nil || c == nil {
+			return "", false
+		}
+		sa = c.Spec.ServiceAccountResolved
+	case "job":
+		j, err := tg.store.GetRayJob(ctx, core.ClusterId(id))
+		if err != nil || j == nil {
+			return "", false
+		}
+		sa = j.Spec.ServiceAccountResolved
+	case "service":
+		svc, err := tg.store.GetService(ctx, id)
+		if err != nil || svc == nil {
+			return "", false
+		}
+		sa = svc.Spec.ServiceAccountResolved
+	}
+	if sa == nil || *sa == "" {
+		return "", false
+	}
+	return *sa, true
+}
+
 // Cleanup deletes every cluster and service whose name carries the run
 // prefix, as admin.
 func (tg *target) Cleanup(ctx context.Context) error {

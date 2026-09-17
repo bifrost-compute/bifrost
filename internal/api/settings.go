@@ -209,17 +209,19 @@ func policyView(p *controller.StoredPolicy, source string) PolicyView {
 	storage := storageToWire(p.Storage)
 	environments := environmentsToWire(p.Environments)
 	images := imagesToWire(p.Images)
+	workloadIdentity := workloadIdentityToWire(p.WorkloadIdentity)
 	return PolicyView{
-		Images:       &images,
-		Prices:       prices,
-		Quotas:       quotas,
-		Budgets:      budgets,
-		Profiles:     &profiles,
-		Admission:    &admission,
-		Storage:      &storage,
-		Environments: &environments,
-		Source:       source,
-		Editable:     true,
+		Images:           &images,
+		WorkloadIdentity: &workloadIdentity,
+		Prices:           prices,
+		Quotas:           quotas,
+		Budgets:          budgets,
+		Profiles:         &profiles,
+		Admission:        &admission,
+		Storage:          &storage,
+		Environments:     &environments,
+		Source:           source,
+		Editable:         true,
 	}
 }
 
@@ -656,6 +658,13 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 			return nil, err
 		}
 	}
+	var workloadIdentity map[string]core.WorkloadIdentityRule
+	if body.WorkloadIdentity != nil {
+		var err error
+		if workloadIdentity, err = workloadIdentityFromWire(*body.WorkloadIdentity); err != nil {
+			return nil, err
+		}
+	}
 
 	next, err := effectivePolicy(ctx, s.Store, &s.PolicySeed)
 	if err != nil {
@@ -696,6 +705,12 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 	// admitted with.
 	if body.Images != nil {
 		next.Images = images
+	}
+	// Workload identity (#20) follows the same section-replace rule and is
+	// never retroactive either: a workload keeps the ServiceAccount it was
+	// admitted with (core.ClusterSpec.ServiceAccountResolved).
+	if body.WorkloadIdentity != nil {
+		next.WorkloadIdentity = workloadIdentity
 	}
 	// Environments (#52) follow the same section-replace rule as profiles,
 	// admission and storage: a present key replaces the whole catalog (`[]`

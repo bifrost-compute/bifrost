@@ -181,6 +181,14 @@ func (h *k8sHandle) postflight(ctx context.Context, prefix, probeNS string) erro
 				_ = h.raw.Delete(ctx, &secrets.Items[i])
 			}
 		}
+		// Requirement 20 tests create run-labelled ServiceAccounts for the
+		// workload-identity rules to name; reap them the same way.
+		var sas corev1.ServiceAccountList
+		if err := h.raw.List(ctx, &sas, ctrlclient.InNamespace(ns), runSel); err == nil {
+			for i := range sas.Items {
+				_ = h.raw.Delete(ctx, &sas.Items[i])
+			}
+		}
 	}
 
 	// The sweep gets its own deadline so a slow teardown reports what is

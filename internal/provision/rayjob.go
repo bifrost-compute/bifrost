@@ -68,6 +68,9 @@ func ClusterSpecForJob(id core.ClusterId, spec *core.RayJobSpec) core.ClusterSpe
 		Profile:         spec.Profile,
 		Storage:         spec.Storage,
 		StorageResolved: spec.StorageResolved,
+		// The job's cluster pods run under the job identity (#20), as does
+		// the submitter (submitterTemplate).
+		ServiceAccountResolved: spec.ServiceAccountResolved,
 	}
 }
 
@@ -123,7 +126,9 @@ func RayJobForScheduled(id core.ClusterId, spec *core.RayJobSpec, generation uin
 
 // submitterTemplate is KubeRay's default submitter (its image, its
 // resource envelope, RestartPolicy Never) plus the tenant labels every
-// Bifrost pod carries. Only labels are added: KubeRay fills the command.
+// Bifrost pod carries and the job's workload identity (#20): the
+// submitter runs `ray job submit` as a peer of the cluster, so it holds
+// the same ServiceAccount the cluster's pods do. KubeRay fills the command.
 func submitterTemplate(id string, spec *core.RayJobSpec, sched Scheduling) *corev1.PodTemplateSpec {
 	labels := map[string]string{ClusterIDLabel: id}
 	if spec.Owner != nil {
@@ -132,7 +137,8 @@ func submitterTemplate(id string, spec *core.RayJobSpec, sched Scheduling) *core
 	tmpl := &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: labels},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:      corev1.RestartPolicyNever,
+			ServiceAccountName: derefString(spec.ServiceAccountResolved),
 			Containers: []corev1.Container{{
 				Name:  SubmitterContainerName,
 				Image: spec.Image,

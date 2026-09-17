@@ -29,6 +29,10 @@ gate where identity, quota, and policy are enforced on every request.
   images, CPU / memory / GPU shapes, worker counts, and storage sources users
   may request; users pick from approved options instead of submitting raw
   manifests.
+- **Per-project workload identity** — administrators name the Kubernetes
+  ServiceAccount each project's clusters, jobs and services run under, so a
+  cloud IAM role (EKS Pod Identity, IRSA, GKE Workload Identity) binds to the
+  project's pods and no static credential is needed anywhere.
 - **Fair-share capacity** — Kueue-backed resource pools with quotas, weights,
   and borrowing between groups.
 - **Cost and usage visibility** — who requested what, for how long, and what

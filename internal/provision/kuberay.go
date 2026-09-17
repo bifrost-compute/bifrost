@@ -141,7 +141,7 @@ func RayClusterForScheduled(id core.ClusterId, spec *core.ClusterSpec, autoscali
 	workerSpecs := make([]rayv1.WorkerGroupSpec, 0, len(spec.WorkerGroups))
 	for i := range spec.WorkerGroups {
 		g := spec.WorkerGroups[i]
-		ws, err := workerGroupSpec(string(id), &g, spec.Image, autoscaling, &generation, spec.Owner, spec.StorageResolved, sched)
+		ws, err := workerGroupSpec(string(id), &g, spec.Image, autoscaling, &generation, spec.Owner, spec.StorageResolved, derefString(spec.ServiceAccountResolved), sched)
 		if err != nil {
 			return nil, fmt.Errorf("provision: worker group %q: %w", g.Name, err)
 		}
@@ -242,6 +242,19 @@ type fingerprintSpec struct {
 	// Storage is omitted when empty so specs without storage fingerprint
 	// exactly as they did before requirement 12.
 	Storage []fingerprintStorage `json:"storage,omitempty"`
+	// ServiceAccount is the workload identity (#20), read back off the
+	// head template's serviceAccountName; omitted when empty for the same
+	// reason as Storage. A stripped or swapped ServiceAccount is drift —
+	// it would change which cloud IAM role the pods hold.
+	ServiceAccount string `json:"service_account,omitempty"`
+}
+
+// derefString is the "" for nil of an optional string.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // sortStorageProjection orders a projection deterministically (secret,
@@ -352,12 +365,13 @@ func OwnedSpecFingerprint(spec *core.ClusterSpec) string {
 		}
 	}
 	b, err := json.Marshal(fingerprintSpec{
-		RayVersion: spec.RayVersion,
-		Image:      spec.Image,
-		HeadCpu:    canonicalQuantity(spec.HeadCpu),
-		HeadMemory: canonicalQuantity(spec.HeadMemory),
-		Workers:    workers,
-		Storage:    storageProjection(spec.StorageResolved),
+		RayVersion:     spec.RayVersion,
+		Image:          spec.Image,
+		HeadCpu:        canonicalQuantity(spec.HeadCpu),
+		HeadMemory:     canonicalQuantity(spec.HeadMemory),
+		Workers:        workers,
+		Storage:        storageProjection(spec.StorageResolved),
+		ServiceAccount: derefString(spec.ServiceAccountResolved),
 	})
 	if err != nil {
 		// fingerprintSpec is built entirely from strings/uint32s: only a
@@ -432,12 +446,13 @@ func FingerprintFromRayCluster(spec *rayv1.RayClusterSpec) (fingerprint string, 
 	}
 	image, _ := containerImage(&spec.HeadGroupSpec.Template)
 	b, err := json.Marshal(fingerprintSpec{
-		RayVersion: spec.RayVersion,
-		Image:      image,
-		HeadCpu:    headCPU,
-		HeadMemory: headMemory,
-		Workers:    workers,
-		Storage:    storageFromTemplate(&spec.HeadGroupSpec.Template),
+		RayVersion:     spec.RayVersion,
+		Image:          image,
+		HeadCpu:        headCPU,
+		HeadMemory:     headMemory,
+		Workers:        workers,
+		Storage:        storageFromTemplate(&spec.HeadGroupSpec.Template),
+		ServiceAccount: spec.HeadGroupSpec.Template.Spec.ServiceAccountName,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("provision: marshaling fingerprint: %v", err))
@@ -489,7 +504,7 @@ func containerImage(tmpl *corev1.PodTemplateSpec) (string, bool) {
 }
 
 func headGroupSpec(id string, spec *core.ClusterSpec, generation *uint64, sched Scheduling) (rayv1.HeadGroupSpec, error) {
-	tmpl, err := podTemplate(id, HeadContainerName, spec.Image, spec.HeadCpu, spec.HeadMemory, nil, generation, spec.Owner, spec.StorageResolved, sched)
+	tmpl, err := podTemplate(id, HeadContainerName, spec.Image, spec.HeadCpu, spec.HeadMemory, nil, generation, spec.Owner, spec.StorageResolved, derefString(spec.ServiceAccountResolved), sched)
 	if err != nil {
 		return rayv1.HeadGroupSpec{}, err
 	}
@@ -499,11 +514,11 @@ func headGroupSpec(id string, spec *core.ClusterSpec, generation *uint64, sched 
 	}, nil
 }
 
-func workerGroupSpec(id string, g *core.WorkerGroup, image string, autoscaling bool, generation *uint64, owner *string, storage []core.ResolvedStorage, sched Scheduling) (rayv1.WorkerGroupSpec, error) {
+func workerGroupSpec(id string, g *core.WorkerGroup, image string, autoscaling bool, generation *uint64, owner *string, storage []core.ResolvedStorage, serviceAccount string, sched Scheduling) (rayv1.WorkerGroupSpec, error) {
 	// Workers run the cluster image (Kubernetes requires an image on
 	// every container; KubeRay does NOT copy the head image onto worker
 	// groups, so an empty image would be rejected).
-	tmpl, err := podTemplate(id, WorkerContainerName, image, g.Cpu, g.Memory, g.Gpu, generation, owner, storage, sched)
+	tmpl, err := podTemplate(id, WorkerContainerName, image, g.Cpu, g.Memory, g.Gpu, generation, owner, storage, serviceAccount, sched)
 	if err != nil {
 		return rayv1.WorkerGroupSpec{}, err
 	}
@@ -570,7 +585,13 @@ func rayProbe(head bool) *corev1.Probe {
 // Secret volume, or a read-write PersistentVolumeClaim). Only
 // Secret NAMES are written; the kubelet resolves them inside the pod, so
 // the credentials never pass through Bifrost.
-func podTemplate(clusterID, containerName, image, cpu, memory string, gpu *string, generation *uint64, owner *string, storage []core.ResolvedStorage, sched Scheduling) (corev1.PodTemplateSpec, error) {
+//
+// serviceAccount is the workload identity (#20): the ServiceAccount the
+// pod runs under, "" for the namespace default. Only the NAME is written;
+// the platform owns the account and whatever cloud IAM role is bound to
+// it, so credentials reach the pod from the node's identity agent and
+// never through Bifrost.
+func podTemplate(clusterID, containerName, image, cpu, memory string, gpu *string, generation *uint64, owner *string, storage []core.ResolvedStorage, serviceAccount string, sched Scheduling) (corev1.PodTemplateSpec, error) {
 	cpuQ, err := resource.ParseQuantity(cpu)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("provision: invalid cpu quantity %q: %w", cpu, err)
@@ -623,7 +644,7 @@ func podTemplate(clusterID, containerName, image, cpu, memory string, gpu *strin
 	}
 	tmpl := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{container}, Volumes: volumes},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{container}, Volumes: volumes, ServiceAccountName: serviceAccount},
 	}
 	// Deployment-wide placement (where this control plane may put tenant
 	// pods on this cluster). A zero Scheduling leaves the spec untouched.
@@ -745,11 +766,11 @@ func RayServiceForScheduled(name string, spec *core.ServiceSpec, generation uint
 	}
 	// Serve worker replicas are fixed here (autoscaling=false); Serve
 	// autoscaling is Ray Serve's own concern (deployment num_replicas).
-	workerSpec, err := workerGroupSpec(name, &worker, spec.Image, false, nil, nil, spec.StorageResolved, sched)
+	workerSpec, err := workerGroupSpec(name, &worker, spec.Image, false, nil, nil, spec.StorageResolved, derefString(spec.ServiceAccountResolved), sched)
 	if err != nil {
 		return nil, fmt.Errorf("provision: service worker group: %w", err)
 	}
-	headTmpl, err := podTemplate(name, HeadContainerName, spec.Image, spec.HeadCpu, spec.HeadMemory, nil, nil, nil, spec.StorageResolved, sched)
+	headTmpl, err := podTemplate(name, HeadContainerName, spec.Image, spec.HeadCpu, spec.HeadMemory, nil, nil, nil, spec.StorageResolved, derefString(spec.ServiceAccountResolved), sched)
 	if err != nil {
 		return nil, fmt.Errorf("provision: service head group: %w", err)
 	}

@@ -497,6 +497,12 @@ func (s *Server) CreateCluster(ctx context.Context, req CreateClusterRequestObje
 		return nil, err
 	}
 	spec.StorageResolved = resolved
+	// Workload identity (#20): the ServiceAccount the project's interactive
+	// clusters run under, pinned here so a later rule edit never reaches a
+	// running cluster. nil = the namespace default.
+	if spec.ServiceAccountResolved, err = s.resolveWorkloadIdentity(ctx, spec.Project, core.WorkloadInteractive); err != nil {
+		return nil, err
+	}
 	// Tier-2 owned session clusters: the authenticated caller is always
 	// the recorded owner, overriding any client-supplied value — the body
 	// is untrusted (ownership is who asked, not what they claim). nil

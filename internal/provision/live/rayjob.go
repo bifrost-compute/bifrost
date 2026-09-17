@@ -53,6 +53,11 @@ func (j *JobClient) ApplyJob(ctx context.Context, id core.ClusterId, spec *core.
 	if err := j.ensurePackageProxyEgress(ctx, string(id), spec.RuntimeEnvYaml); err != nil {
 		return err
 	}
+	// Workload identity (#20): a missing ServiceAccount is a readable
+	// condition here, not a submitter and a head stuck in ContainerCreating.
+	if err := j.ensureServiceAccountExists(ctx, spec.ServiceAccountResolved); err != nil {
+		return err
+	}
 	manifest, err := provision.RayJobForScheduled(id, spec, generation, queue, j.scheduling)
 	if err != nil {
 		return provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: err.Error()}

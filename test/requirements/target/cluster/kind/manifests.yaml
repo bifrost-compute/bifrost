@@ -39,6 +39,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
+  # Requirement 20: an existence check (metadata only) on the ServiceAccount
+  # a workload-identity rule names; Bifrost never creates or binds one.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "create", "patch", "delete"]
