@@ -620,3 +620,24 @@ func TestSumLocalQueueUsageEmpty(t *testing.T) {
 		t.Fatalf("got %v, want empty", got)
 	}
 }
+
+// The log tail names the Ray container, never the autoscaler sidecar that
+// shares an autoscaled head pod, and falls back to the first container
+// for a pod Bifrost did not shape.
+func TestLogContainerPrefersTheRayContainer(t *testing.T) {
+	head := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "autoscaler"}, {Name: HeadContainerName}}}}
+	if got := LogContainer(head); got != HeadContainerName {
+		t.Errorf("head pod log container = %q, want %s", got, HeadContainerName)
+	}
+	worker := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: WorkerContainerName}}}}
+	if got := LogContainer(worker); got != WorkerContainerName {
+		t.Errorf("worker = %q", got)
+	}
+	other := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}, {Name: "sidecar"}}}}
+	if got := LogContainer(other); got != "main" {
+		t.Errorf("unshaped pod = %q, want its first container", got)
+	}
+	if got := LogContainer(&corev1.Pod{}); got != "" {
+		t.Errorf("no containers = %q, want \"\"", got)
+	}
+}

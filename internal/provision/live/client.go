@@ -933,8 +933,20 @@ func (c *Client) ClusterLogs(ctx context.Context, id core.ClusterId, pod *string
 		target = ordered[0]
 	}
 
+	// Name the Ray container explicitly: an autoscaled head pod carries the
+	// KubeRay autoscaler sidecar as well, and a log request that names no
+	// container on a multi-container pod is a 400 from the API server
+	// ("a container name must be specified"), which surfaced as every logs
+	// tab on an autoscaling deployment answering 503.
+	var container string
+	for i := range pods.Items {
+		if pods.Items[i].Name == target {
+			container = provision.LogContainer(&pods.Items[i])
+			break
+		}
+	}
 	tailInt64 := int64(tail)
-	raw, err := c.clientset.CoreV1().Pods(ns).GetLogs(target, &corev1.PodLogOptions{TailLines: &tailInt64, Timestamps: true}).DoRaw(ctx)
+	raw, err := c.clientset.CoreV1().Pods(ns).GetLogs(target, &corev1.PodLogOptions{Container: container, TailLines: &tailInt64, Timestamps: true}).DoRaw(ctx)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, wrapErr(err)

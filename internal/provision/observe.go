@@ -481,6 +481,26 @@ func RankPods(pods []corev1.Pod) []string {
 	return out
 }
 
+// LogContainer is the container a log tail of pod should read: the Ray
+// container by its KubeRay name (head, worker or the RayJob submitter),
+// else the pod's first container, else "" (a pod with no containers, which
+// the API server will reject on its own). KubeRay's autoscaler sidecar
+// rides the head pod, and a log request on a multi-container pod must
+// name one.
+func LogContainer(pod *corev1.Pod) string {
+	for _, want := range []string{HeadContainerName, WorkerContainerName, SubmitterContainerName} {
+		for _, c := range pod.Spec.Containers {
+			if c.Name == want {
+				return c.Name
+			}
+		}
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Name
+	}
+	return ""
+}
+
 // ---------------------------------------------------------------------------
 // Kueue pool-observation mappers (ADR-0010-equivalent; the body of
 // PoolProvisioner.ObservePool). Moved here from internal/provision/live
