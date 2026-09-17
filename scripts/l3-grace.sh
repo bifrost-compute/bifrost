@@ -12,6 +12,9 @@
 # macOS here. The kind lane runs the same tests with -race.
 #
 # Usage: scripts/l3-grace.sh [out.json]     (env GRACE_HOST=user@host)
+#        REQ_PKGS='r20_|r12_' scripts/l3-grace.sh   runs only the matching
+#        requirement packages (an egrep pattern over the package basename);
+#        unset = every package, the lane of record.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -34,6 +37,9 @@ GATEWAY_DOMAIN=${REQ_GATEWAY_DOMAIN:-ray.100-89-230-107.sslip.io}
 # the grace lane until grace runs an image that carries the fix.
 # r17_slurm is an AST guard over the source tree, which grace does not have.
 pkgs=$(go list ./test/requirements/... | grep -E '/test/requirements/r[0-9]{2}_[a-z0-9_]+$' | grep -v '/r17_slurm$')
+if [ -n "${REQ_PKGS:-}" ]; then
+  pkgs=$(printf '%s\n' $pkgs | grep -E "/test/requirements/(${REQ_PKGS})")
+fi
 
 rm -rf .l3 && mkdir -p .l3/bin .l3/out
 for p in $pkgs; do

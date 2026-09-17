@@ -160,6 +160,33 @@ On EKS the remaining steps are the platform's: create the account per
 tenant namespace, create the Pod Identity association to a role whose
 policy grants the tenant's S3 prefix and KMS key, and PUT the rule.
 
+### 4.4 The S3 requirement, stated plainly
+
+Workload identity delivers S3 access without a static credential only when
+the object store can **verify the pod's identity token and map it to a
+policy**. That is what EKS Pod Identity (or IRSA) does against AWS S3: the
+pod presents its projected ServiceAccount token, STS exchanges it for role
+credentials, the role's policy names the tenant's prefix, KMS grants follow
+the role. Three things have to be true, and only the third is Bifrost's:
+
+1. The store (or an STS in front of it) trusts the cluster's OIDC issuer
+   and implements `AssumeRoleWithWebIdentity` — AWS does; MinIO does
+   (OpenID provider = the Kubernetes API server); **aks3 does not yet**:
+   as of `bf9c57c` it authenticates SigV4 against a single root credential
+   with no STS, no per-user keys and no bucket policies (Phase 0).
+2. A per-tenant policy exists: prefix-scoped bucket policy or IAM role,
+   plus the KMS grant, created by the platform per tenant.
+3. The pods carry the tenant's ServiceAccount — this change.
+
+On grace the store is aks3 and `team-a` reaches it through the
+`team-a-aks3` Secret (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+`AWS_ENDPOINT_URL` / `AWS_REGION`), the static-credential pattern this
+design retires. Until aks3 grows an STS endpoint with web-identity
+federation and prefix policies, grace validates (3) — pods run under the
+named account and hold its projected token — and keeps (1)–(2) on the
+storage catalog. The ATEP EKS path needs no aks3 work: (1) and (2) are
+AWS and Terraform.
+
 ## 5. Follow-ons (not built)
 
 ### 5.1 One namespace per project
