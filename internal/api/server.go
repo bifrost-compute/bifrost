@@ -11,6 +11,7 @@ import (
 	"github.com/bifrost-compute/bifrost/internal/controller"
 	"github.com/bifrost-compute/bifrost/internal/core"
 	"github.com/bifrost-compute/bifrost/internal/provision"
+	"github.com/bifrost-compute/bifrost/internal/registry"
 )
 
 // SpecPath is where the vendored OpenAPI contract is served. The Rust predecessor's
@@ -90,6 +91,9 @@ type Server struct {
 	// JobProvisioner backs the ephemeral RayJob operations (requirement
 	// 5). nil means no job backend is configured.
 	JobProvisioner provision.JobProvisioner
+	// Images reads image manifests and configs for inspect_image (#10).
+	// nil = an anonymous client (public and loopback registries).
+	Images *registry.Client
 	// GatewayDomain is the DNS suffix dynamically registered clusters are
 	// exposed under (`<name>.<GatewayDomain>`, plan ruling D1); "" = no
 	// dynamic gateway.

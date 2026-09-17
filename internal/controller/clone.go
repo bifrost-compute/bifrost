@@ -318,7 +318,21 @@ func cloneStoredPolicy(p StoredPolicy) StoredPolicy {
 	p.Admission = cloneAdmission(p.Admission)
 	p.Storage = cloneStorageEntries(p.Storage)
 	p.Environments = cloneEnvironments(p.Environments)
+	p.Images = cloneImageEntries(p.Images)
 	return p
+}
+
+func cloneImageEntries(in []core.ImageEntry) []core.ImageEntry {
+	if in == nil {
+		return nil
+	}
+	out := make([]core.ImageEntry, len(in))
+	for i, e := range in {
+		e.Description = clonePtr(e.Description)
+		e.Projects = cloneStringSlice(e.Projects)
+		out[i] = e
+	}
+	return out
 }
 
 // cloneAuditEvent deep-copies a core.AuditEvent's nine pointer fields and

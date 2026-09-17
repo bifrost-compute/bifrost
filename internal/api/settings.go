@@ -208,7 +208,9 @@ func policyView(p *controller.StoredPolicy, source string) PolicyView {
 	admission := admissionToWire(p.Admission)
 	storage := storageToWire(p.Storage)
 	environments := environmentsToWire(p.Environments)
+	images := imagesToWire(p.Images)
 	return PolicyView{
+		Images:       &images,
 		Prices:       prices,
 		Quotas:       quotas,
 		Budgets:      budgets,
@@ -391,6 +393,9 @@ func admissionRuleToWire(r core.AdmissionRule) AdmissionRule {
 	copy(images, r.AllowedImages)
 	max := int32(r.MaxWorkers)
 	out := AdmissionRule{AllowedImages: &images, MaxWorkers: &max}
+	if r.CatalogOnly {
+		out.CatalogOnly = &r.CatalogOnly
+	}
 	if r.AllowPyExecutable {
 		out.AllowPyExecutable = &r.AllowPyExecutable
 	}
@@ -469,6 +474,9 @@ func admissionFromWire(in map[string]AdmissionRule) (map[string]core.AdmissionRu
 				return nil, badRequest(what + "max_workers must be non-negative")
 			}
 			r.MaxWorkers = uint32(*w.MaxWorkers)
+		}
+		if w.CatalogOnly != nil {
+			r.CatalogOnly = *w.CatalogOnly
 		}
 		if w.AllowPyExecutable != nil {
 			r.AllowPyExecutable = *w.AllowPyExecutable
@@ -634,6 +642,13 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 			return nil, err
 		}
 	}
+	var images []core.ImageEntry
+	if body.Images != nil {
+		var err error
+		if images, err = imagesFromWire(*body.Images); err != nil {
+			return nil, err
+		}
+	}
 	var environments []core.Environment
 	if body.Environments != nil {
 		var err error
@@ -675,6 +690,12 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 	}
 	if body.Storage != nil {
 		next.Storage = storage
+	}
+	// The image catalog (#10) follows the same section-replace rule; a
+	// spec admitted against the old catalog keeps the image it was
+	// admitted with.
+	if body.Images != nil {
+		next.Images = images
 	}
 	// Environments (#52) follow the same section-replace rule as profiles,
 	// admission and storage: a present key replaces the whole catalog (`[]`

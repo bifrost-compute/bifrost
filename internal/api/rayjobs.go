@@ -146,6 +146,17 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 	if view.HeadMemory == "" {
 		view.HeadMemory = defaultJobHeadMemory
 	}
+	admission, aerr := s.admissionFor(ctx, view.Project)
+	if aerr != nil {
+		return "", wrapStoreErr(aerr)
+	}
+	// A catalog image (#10) states its Ray version; the tag heuristic is
+	// the fallback for images the catalog does not know.
+	if view.RayVersion == "" {
+		if entry := admission.CatalogEntry(view.Image); entry != nil {
+			view.RayVersion = entry.RayVersion
+		}
+	}
 	if view.RayVersion == "" {
 		v, ok := provision.RayVersionFromImage(view.Image)
 		if !ok {
@@ -155,10 +166,6 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 	}
 	if verr := validateClusterShape(&view); verr != nil {
 		return "invalid_spec", verr
-	}
-	admission, aerr := s.admissionFor(ctx, view.Project)
-	if aerr != nil {
-		return "", wrapStoreErr(aerr)
 	}
 	if aerr := admission.Check(&view); aerr != nil {
 		return aerr.reason, badRequest(aerr.message)

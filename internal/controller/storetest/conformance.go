@@ -1497,6 +1497,11 @@ func policyFixture(cpuPrice float64, seed bool) *controller.StoredPolicy {
 			PublishedBy: strPtr("root"), PublishedAt: &policyFixturePublishedAt,
 			Scan: &core.EnvironmentScan{Status: core.EnvironmentScanClean, Scanner: strPtr("trivy 0.57.0"), ScannedAt: &policyFixturePublishedAt},
 		}},
+		// #10: the image catalog rides the row too.
+		Images: []core.ImageEntry{
+			{Name: "ray-2.57", Description: strPtr("upstream"), Ref: "rayproject/ray:2.57.0", Digest: "", RayVersion: "2.57.0", PythonVersion: "3.11", Projects: []string{}},
+			{Name: "team-ray", Ref: "registry.example/ml/ray:2.57.0-team", Digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Engine: core.EngineRay, RayVersion: "2.57.0", PythonVersion: "", Projects: []string{"ml-team"}},
+		},
 	}
 }
 
@@ -1564,6 +1569,7 @@ func runPolicySeedConformance(t *testing.T, store controller.Store) {
 		Admission:    map[string]core.AdmissionRule{},
 		Storage:      []core.StorageEntry{},
 		Environments: []core.Environment{},
+		Images:       []core.ImageEntry{},
 	}
 
 	inserted, err := store.SeedPolicy(ctx, seed)

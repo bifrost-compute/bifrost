@@ -474,6 +474,13 @@ func (s *Server) CreateCluster(ctx context.Context, req CreateClusterRequestObje
 	if err != nil {
 		return nil, wrapStoreErr(err)
 	}
+	// A catalog image (#10) knows its Ray version; a spec that leaves
+	// ray_version empty takes it from there instead of the tag.
+	if spec.RayVersion == "" {
+		if entry := admission.CatalogEntry(spec.Image); entry != nil {
+			spec.RayVersion = entry.RayVersion
+		}
+	}
 	if aerr := admission.Check(&spec); aerr != nil {
 		s.denyCreate(ctx, identity, body.Id, aerr.reason, http.StatusBadRequest)
 		return nil, badRequest(aerr.message)

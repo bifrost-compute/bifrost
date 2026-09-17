@@ -277,6 +277,9 @@ type AdmissionRule struct {
 	// AllowedRemoteSchemes URI schemes remote working_dir/py_modules may use (with allowed_remote_hosts); empty = local uploads only (#53).
 	AllowedRemoteSchemes *[]string `json:"allowed_remote_schemes,omitempty"`
 
+	// CatalogOnly Require a cluster/job's image to be an image catalog entry (#10) open to the project; false = `allowed_images` alone decides.
+	CatalogOnly *bool `json:"catalog_only,omitempty"`
+
 	// MaxDocumentBytes Cap on the raw runtime_env_yaml document size; 0 = the platform default (64 KiB) (#53).
 	MaxDocumentBytes *int64 `json:"max_document_bytes,omitempty"`
 
@@ -828,6 +831,101 @@ type IdentityResponse struct {
 	Subject string   `json:"subject"`
 }
 
+// ImageConfig The image config blob as the OCI image spec defines it: what a container from this image starts with.
+type ImageConfig struct {
+	Cmd        []string `json:"cmd"`
+	Entrypoint []string `json:"entrypoint"`
+
+	// Env Environment variables, split at the first `=`.
+	Env          map[string]string `json:"env"`
+	ExposedPorts []string          `json:"exposed_ports"`
+	Labels       map[string]string `json:"labels"`
+	User         string            `json:"user"`
+	WorkingDir   string            `json:"working_dir"`
+}
+
+// ImageEntry An approved container image (#7/#10): a reference an administrator vetted, with its engine and Ray version spelled out instead of guessed from the tag. Specs still carry `image` as a string; when a project's admission rule is `catalog_only` that string must be an entry's `ref` (or `repo@digest` when pinned), and an entry's `ray_version` fills a spec that leaves it empty. An environment's `base_image` is admitted through the same rule.
+type ImageEntry struct {
+	// Description Human-readable summary shown by clients.
+	Description *string `json:"description,omitempty"`
+
+	// Digest Manifest digest `ref` is pinned to (`sha256:…`); empty = unpinned, the tag is followed.
+	Digest *string `json:"digest,omitempty"`
+
+	// Engine Engine the image carries; absent = ray.
+	Engine *Engine `json:"engine,omitempty"`
+
+	// Name Catalog name clients show and pick.
+	Name string `json:"name"`
+
+	// Projects Projects that may use this image; empty = every project.
+	Projects *[]string `json:"projects,omitempty"`
+
+	// PythonVersion Interpreter version inside the image, for kernel matching; empty = unknown.
+	PythonVersion *string `json:"python_version,omitempty"`
+
+	// RayVersion Ray version inside the image (ray engine).
+	RayVersion *string `json:"ray_version,omitempty"`
+
+	// Ref Image reference the pods run: `registry/repo:tag` or `registry/repo@sha256:…`.
+	Ref string `json:"ref"`
+}
+
+// ImageHistoryEntry One `history` row of the image config — the instruction that produced a layer (BuildKit/docker record the Dockerfile line in `created_by`), joined to the layer it produced when it produced one. This is the closest an image gets to its Dockerfile.
+type ImageHistoryEntry struct {
+	Comment *string `json:"comment,omitempty"`
+
+	// Created RFC 3339 timestamp when recorded.
+	Created   *string `json:"created,omitempty"`
+	CreatedBy string  `json:"created_by"`
+
+	// EmptyLayer True for instructions that changed only metadata (ENV, LABEL, CMD, …).
+	EmptyLayer bool `json:"empty_layer"`
+
+	// LayerDigest Digest of the layer this step produced; `null` for an empty layer.
+	LayerDigest *string `json:"layer_digest,omitempty"`
+
+	// SizeBytes Compressed size of that layer; `null` for an empty layer.
+	SizeBytes *int64 `json:"size_bytes,omitempty"`
+}
+
+// ImageInspect What a catalog image looks like without pulling it (#10): the manifest and config blob read from its registry — platform, size, the container config (env, entrypoint, user, labels), the per-layer build history and the layers. One shape, shared with any other console that renders it.
+type ImageInspect struct {
+	// Config The image config blob as the OCI image spec defines it: what a container from this image starts with.
+	Config ImageConfig `json:"config"`
+
+	// Digest Digest of the manifest that was inspected (the platform manifest when `reference` resolved to an index).
+	Digest  string              `json:"digest"`
+	History []ImageHistoryEntry `json:"history"`
+	Layers  []ImageLayer        `json:"layers"`
+
+	// Platforms Every platform the reference offers (one for a single-platform manifest).
+	Platforms []ImagePlatform `json:"platforms"`
+
+	// Reference The reference that was inspected, as the catalog entry names it.
+	Reference string `json:"reference"`
+
+	// SizeBytes Sum of the inspected manifest's compressed layer sizes.
+	SizeBytes int64 `json:"size_bytes"`
+
+	// Source Which producer filled the document: `registry` (Bifrost read the manifest and config itself).
+	Source string `json:"source"`
+}
+
+// ImageLayer defines model for ImageLayer.
+type ImageLayer struct {
+	Digest    string `json:"digest"`
+	MediaType string `json:"media_type"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+// ImagePlatform defines model for ImagePlatform.
+type ImagePlatform struct {
+	Architecture string  `json:"architecture"`
+	Os           string  `json:"os"`
+	Variant      *string `json:"variant,omitempty"`
+}
+
 // JobView A job in the persistent, cross-cluster history (Phase 3, spec §5.5).
 type JobView struct {
 	Cluster string `json:"cluster"`
@@ -952,6 +1050,9 @@ type PolicyView struct {
 
 	// Environments The environment catalog (#52); empty when none are configured.
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// Images The image catalog (#7/#10); empty when none are configured.
+	Images *[]ImageEntry `json:"images,omitempty"`
 
 	// Prices resource → $/unit-hour; `null` when no price sheet is configured.
 	Prices *map[string]float64 `json:"prices,omitempty"`
@@ -1369,6 +1470,9 @@ type UpdatePolicy struct {
 	// Environments Present replaces the whole environment catalog (`[]` clears it) (#52).
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
 
+	// Images Present replaces the whole image catalog (`[]` clears it) (#7/#10).
+	Images *[]ImageEntry `json:"images,omitempty"`
+
 	// Prices Present (incl. explicit `null`) replaces/clears the price sheet.
 	Prices *map[string]float64 `json:"prices,omitempty"`
 
@@ -1770,6 +1874,12 @@ type ServerInterface interface {
 	// unauthenticated dev loop renders the full console.
 	// (GET /api/v1/identity)
 	Identity(w http.ResponseWriter, r *http.Request)
+
+	// (GET /api/v1/images)
+	ListImages(w http.ResponseWriter, r *http.Request)
+
+	// (GET /api/v1/images/{name}/inspect)
+	InspectImage(w http.ResponseWriter, r *http.Request, name string)
 
 	// (GET /api/v1/jobs)
 	ListJobs(w http.ResponseWriter, r *http.Request)
@@ -2674,6 +2784,46 @@ func (siw *ServerInterfaceWrapper) Identity(w http.ResponseWriter, r *http.Reque
 	handler.ServeHTTP(w, r)
 }
 
+// ListImages operation middleware
+func (siw *ServerInterfaceWrapper) ListImages(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListImages(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// InspectImage operation middleware
+func (siw *ServerInterfaceWrapper) InspectImage(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.InspectImage(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListJobs operation middleware
 func (siw *ServerInterfaceWrapper) ListJobs(w http.ResponseWriter, r *http.Request) {
 
@@ -3383,6 +3533,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/clusters/{id}/suspend", wrapper.SuspendCluster)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/environments", wrapper.ListEnvironments)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/identity", wrapper.Identity)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/images", wrapper.ListImages)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/images/{name}/inspect", wrapper.InspectImage)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs", wrapper.ListJobs)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/jobs", wrapper.SubmitJob)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/jobs/{id}", wrapper.DeleteJob)
@@ -4629,6 +4781,97 @@ func (response Identity401Response) VisitIdentityResponse(w http.ResponseWriter)
 	return nil
 }
 
+type ListImagesRequestObject struct {
+}
+
+type ListImagesResponseObject interface {
+	VisitListImagesResponse(w http.ResponseWriter) error
+}
+
+type ListImages200JSONResponse []ImageEntry
+
+func (response ListImages200JSONResponse) VisitListImagesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListImages401Response struct {
+}
+
+func (response ListImages401Response) VisitListImagesResponse(w http.ResponseWriter) error {
+	w.WriteHeader(401)
+	return nil
+}
+
+type ListImages403Response struct {
+}
+
+func (response ListImages403Response) VisitListImagesResponse(w http.ResponseWriter) error {
+	w.WriteHeader(403)
+	return nil
+}
+
+type InspectImageRequestObject struct {
+	Name string `json:"name"`
+}
+
+type InspectImageResponseObject interface {
+	VisitInspectImageResponse(w http.ResponseWriter) error
+}
+
+type InspectImage200JSONResponse ImageInspect
+
+func (response InspectImage200JSONResponse) VisitInspectImageResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type InspectImage401Response struct {
+}
+
+func (response InspectImage401Response) VisitInspectImageResponse(w http.ResponseWriter) error {
+	w.WriteHeader(401)
+	return nil
+}
+
+type InspectImage403Response struct {
+}
+
+func (response InspectImage403Response) VisitInspectImageResponse(w http.ResponseWriter) error {
+	w.WriteHeader(403)
+	return nil
+}
+
+type InspectImage404Response struct {
+}
+
+func (response InspectImage404Response) VisitInspectImageResponse(w http.ResponseWriter) error {
+	w.WriteHeader(404)
+	return nil
+}
+
+type InspectImage502Response struct {
+}
+
+func (response InspectImage502Response) VisitInspectImageResponse(w http.ResponseWriter) error {
+	w.WriteHeader(502)
+	return nil
+}
+
 type ListJobsRequestObject struct {
 }
 
@@ -5710,6 +5953,12 @@ type StrictServerInterface interface {
 	// (GET /api/v1/identity)
 	Identity(ctx context.Context, request IdentityRequestObject) (IdentityResponseObject, error)
 
+	// (GET /api/v1/images)
+	ListImages(ctx context.Context, request ListImagesRequestObject) (ListImagesResponseObject, error)
+
+	// (GET /api/v1/images/{name}/inspect)
+	InspectImage(ctx context.Context, request InspectImageRequestObject) (InspectImageResponseObject, error)
+
 	// (GET /api/v1/jobs)
 	ListJobs(ctx context.Context, request ListJobsRequestObject) (ListJobsResponseObject, error)
 
@@ -6567,6 +6816,56 @@ func (sh *strictHandler) Identity(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(IdentityResponseObject); ok {
 		if err := validResponse.VisitIdentityResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListImages operation middleware
+func (sh *strictHandler) ListImages(w http.ResponseWriter, r *http.Request) {
+	var request ListImagesRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListImages(ctx, request.(ListImagesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListImages")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListImagesResponseObject); ok {
+		if err := validResponse.VisitListImagesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// InspectImage operation middleware
+func (sh *strictHandler) InspectImage(w http.ResponseWriter, r *http.Request, name string) {
+	var request InspectImageRequestObject
+
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.InspectImage(ctx, request.(InspectImageRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "InspectImage")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(InspectImageResponseObject); ok {
+		if err := validResponse.VisitInspectImageResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

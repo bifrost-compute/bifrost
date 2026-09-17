@@ -55,6 +55,13 @@ func setPolicySections(t *testing.T, tgt req.Target, sections string) {
 			}
 			restore.Admission = &admission
 		}
+		if body.Images != nil {
+			images := []client.ImageEntry{}
+			if before.JSON200.Images != nil {
+				images = *before.JSON200.Images
+			}
+			restore.Images = &images
+		}
 		_, _ = admin.UpdatePolicyWithResponse(context.Background(), restore)
 	})
 }

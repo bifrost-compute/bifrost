@@ -277,6 +277,9 @@ type AdmissionRule struct {
 	// AllowedRemoteSchemes URI schemes remote working_dir/py_modules may use (with allowed_remote_hosts); empty = local uploads only (#53).
 	AllowedRemoteSchemes *[]string `json:"allowed_remote_schemes,omitempty"`
 
+	// CatalogOnly Require a cluster/job's image to be an image catalog entry (#10) open to the project; false = `allowed_images` alone decides.
+	CatalogOnly *bool `json:"catalog_only,omitempty"`
+
 	// MaxDocumentBytes Cap on the raw runtime_env_yaml document size; 0 = the platform default (64 KiB) (#53).
 	MaxDocumentBytes *int64 `json:"max_document_bytes,omitempty"`
 
@@ -828,6 +831,101 @@ type IdentityResponse struct {
 	Subject string   `json:"subject"`
 }
 
+// ImageConfig The image config blob as the OCI image spec defines it: what a container from this image starts with.
+type ImageConfig struct {
+	Cmd        []string `json:"cmd"`
+	Entrypoint []string `json:"entrypoint"`
+
+	// Env Environment variables, split at the first `=`.
+	Env          map[string]string `json:"env"`
+	ExposedPorts []string          `json:"exposed_ports"`
+	Labels       map[string]string `json:"labels"`
+	User         string            `json:"user"`
+	WorkingDir   string            `json:"working_dir"`
+}
+
+// ImageEntry An approved container image (#7/#10): a reference an administrator vetted, with its engine and Ray version spelled out instead of guessed from the tag. Specs still carry `image` as a string; when a project's admission rule is `catalog_only` that string must be an entry's `ref` (or `repo@digest` when pinned), and an entry's `ray_version` fills a spec that leaves it empty. An environment's `base_image` is admitted through the same rule.
+type ImageEntry struct {
+	// Description Human-readable summary shown by clients.
+	Description *string `json:"description,omitempty"`
+
+	// Digest Manifest digest `ref` is pinned to (`sha256:…`); empty = unpinned, the tag is followed.
+	Digest *string `json:"digest,omitempty"`
+
+	// Engine Engine the image carries; absent = ray.
+	Engine *Engine `json:"engine,omitempty"`
+
+	// Name Catalog name clients show and pick.
+	Name string `json:"name"`
+
+	// Projects Projects that may use this image; empty = every project.
+	Projects *[]string `json:"projects,omitempty"`
+
+	// PythonVersion Interpreter version inside the image, for kernel matching; empty = unknown.
+	PythonVersion *string `json:"python_version,omitempty"`
+
+	// RayVersion Ray version inside the image (ray engine).
+	RayVersion *string `json:"ray_version,omitempty"`
+
+	// Ref Image reference the pods run: `registry/repo:tag` or `registry/repo@sha256:…`.
+	Ref string `json:"ref"`
+}
+
+// ImageHistoryEntry One `history` row of the image config — the instruction that produced a layer (BuildKit/docker record the Dockerfile line in `created_by`), joined to the layer it produced when it produced one. This is the closest an image gets to its Dockerfile.
+type ImageHistoryEntry struct {
+	Comment *string `json:"comment,omitempty"`
+
+	// Created RFC 3339 timestamp when recorded.
+	Created   *string `json:"created,omitempty"`
+	CreatedBy string  `json:"created_by"`
+
+	// EmptyLayer True for instructions that changed only metadata (ENV, LABEL, CMD, …).
+	EmptyLayer bool `json:"empty_layer"`
+
+	// LayerDigest Digest of the layer this step produced; `null` for an empty layer.
+	LayerDigest *string `json:"layer_digest,omitempty"`
+
+	// SizeBytes Compressed size of that layer; `null` for an empty layer.
+	SizeBytes *int64 `json:"size_bytes,omitempty"`
+}
+
+// ImageInspect What a catalog image looks like without pulling it (#10): the manifest and config blob read from its registry — platform, size, the container config (env, entrypoint, user, labels), the per-layer build history and the layers. One shape, shared with any other console that renders it.
+type ImageInspect struct {
+	// Config The image config blob as the OCI image spec defines it: what a container from this image starts with.
+	Config ImageConfig `json:"config"`
+
+	// Digest Digest of the manifest that was inspected (the platform manifest when `reference` resolved to an index).
+	Digest  string              `json:"digest"`
+	History []ImageHistoryEntry `json:"history"`
+	Layers  []ImageLayer        `json:"layers"`
+
+	// Platforms Every platform the reference offers (one for a single-platform manifest).
+	Platforms []ImagePlatform `json:"platforms"`
+
+	// Reference The reference that was inspected, as the catalog entry names it.
+	Reference string `json:"reference"`
+
+	// SizeBytes Sum of the inspected manifest's compressed layer sizes.
+	SizeBytes int64 `json:"size_bytes"`
+
+	// Source Which producer filled the document: `registry` (Bifrost read the manifest and config itself).
+	Source string `json:"source"`
+}
+
+// ImageLayer defines model for ImageLayer.
+type ImageLayer struct {
+	Digest    string `json:"digest"`
+	MediaType string `json:"media_type"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+// ImagePlatform defines model for ImagePlatform.
+type ImagePlatform struct {
+	Architecture string  `json:"architecture"`
+	Os           string  `json:"os"`
+	Variant      *string `json:"variant,omitempty"`
+}
+
 // JobView A job in the persistent, cross-cluster history (Phase 3, spec §5.5).
 type JobView struct {
 	Cluster string `json:"cluster"`
@@ -952,6 +1050,9 @@ type PolicyView struct {
 
 	// Environments The environment catalog (#52); empty when none are configured.
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// Images The image catalog (#7/#10); empty when none are configured.
+	Images *[]ImageEntry `json:"images,omitempty"`
 
 	// Prices resource → $/unit-hour; `null` when no price sheet is configured.
 	Prices *map[string]float64 `json:"prices,omitempty"`
@@ -1368,6 +1469,9 @@ type UpdatePolicy struct {
 
 	// Environments Present replaces the whole environment catalog (`[]` clears it) (#52).
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// Images Present replaces the whole image catalog (`[]` clears it) (#7/#10).
+	Images *[]ImageEntry `json:"images,omitempty"`
 
 	// Prices Present (incl. explicit `null`) replaces/clears the price sheet.
 	Prices *map[string]float64 `json:"prices,omitempty"`
@@ -1929,6 +2033,12 @@ type ClientInterface interface {
 	//
 	// Corresponds with GET /api/v1/identity (the `Identity` operationId).
 	Identity(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListImages performs a GET /api/v1/images (the `ListImages` operationId) request.
+	ListImages(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// InspectImage performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
+	InspectImage(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListJobs performs a GET /api/v1/jobs (the `ListJobs` operationId) request.
 	ListJobs(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2565,6 +2675,32 @@ func (c *Client) ListEnvironments(ctx context.Context, reqEditors ...RequestEdit
 // Corresponds with GET /api/v1/identity (the `Identity` operationId).
 func (c *Client) Identity(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewIdentityRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListImages performs a GET /api/v1/images (the `ListImages` operationId) request.
+func (c *Client) ListImages(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListImagesRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// InspectImage performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
+func (c *Client) InspectImage(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewInspectImageRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -4202,6 +4338,67 @@ func NewIdentityRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewListImagesRequest constructs an http.Request for the ListImages method
+func NewListImagesRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/images")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewInspectImageRequest constructs an http.Request for the InspectImage method
+func NewInspectImageRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/images/%s/inspect", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListJobsRequest constructs an http.Request for the ListJobs method
 func NewListJobsRequest(server string) (*http.Request, error) {
 	var err error
@@ -5377,6 +5574,16 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /api/v1/identity (the `Identity` operationId).
 	IdentityWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*IdentityHTTPResponse, error)
+
+	// ListImagesWithResponse performs a GET /api/v1/images (the `ListImages` operationId) request.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	ListImagesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListImagesHTTPResponse, error)
+
+	// InspectImageWithResponse performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	InspectImageWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*InspectImageHTTPResponse, error)
 
 	// ListJobsWithResponse performs a GET /api/v1/jobs (the `ListJobs` operationId) request.
 	//
@@ -6635,6 +6842,88 @@ func (r IdentityHTTPResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r IdentityHTTPResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListImagesHTTPResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *[]ImageEntry
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListImagesHTTPResponse) GetJSON200() *[]ImageEntry {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r ListImagesHTTPResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListImagesHTTPResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListImagesHTTPResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListImagesHTTPResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type InspectImageHTTPResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImageInspect
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r InspectImageHTTPResponse) GetJSON200() *ImageInspect {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r InspectImageHTTPResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r InspectImageHTTPResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r InspectImageHTTPResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r InspectImageHTTPResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -7999,6 +8288,28 @@ func (c *ClientWithResponses) IdentityWithResponse(ctx context.Context, reqEdito
 	return ParseIdentityHTTPResponse(rsp)
 }
 
+// ListImagesWithResponse performs a GET /api/v1/images (the `ListImages` operationId) request.
+//
+// Returns a wrapper object for the known response body format(s).
+func (c *ClientWithResponses) ListImagesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListImagesHTTPResponse, error) {
+	rsp, err := c.ListImages(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListImagesHTTPResponse(rsp)
+}
+
+// InspectImageWithResponse performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
+//
+// Returns a wrapper object for the known response body format(s).
+func (c *ClientWithResponses) InspectImageWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*InspectImageHTTPResponse, error) {
+	rsp, err := c.InspectImage(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseInspectImageHTTPResponse(rsp)
+}
+
 // ListJobsWithResponse performs a GET /api/v1/jobs (the `ListJobs` operationId) request.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -9155,6 +9466,76 @@ func ParseIdentityHTTPResponse(rsp *http.Response) (*IdentityHTTPResponse, error
 		response.JSON200 = &dest
 
 	case rsp.StatusCode == 401:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseListImagesHTTPResponse parses an HTTP response from a ListImagesWithResponse call
+func ParseListImagesHTTPResponse(rsp *http.Response) (*ListImagesHTTPResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListImagesHTTPResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []ImageEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 403:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseInspectImageHTTPResponse parses an HTTP response from a InspectImageWithResponse call
+func ParseInspectImageHTTPResponse(rsp *http.Response) (*InspectImageHTTPResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &InspectImageHTTPResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImageInspect
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 403:
+		break // No content-type
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	case rsp.StatusCode == 502:
 		break // No content-type
 
 	}

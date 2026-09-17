@@ -273,6 +273,10 @@ type AdmissionRule struct {
 	// MaxWorkers is the maximum total worker replicas across all worker
 	// groups; 0 = unlimited.
 	MaxWorkers uint32 `json:"max_workers"`
+	// CatalogOnly requires a cluster/job's image to be an image catalog
+	// entry (#10) open to the project; false = the prefix allowlist alone
+	// decides.
+	CatalogOnly bool `json:"catalog_only,omitempty"`
 
 	// The runtime-env governance knobs (#52) the #53 validator
 	// (api.RuntimeEnvPolicy) hardcoded, carried here so they are

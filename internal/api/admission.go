@@ -20,6 +20,23 @@ type Admission struct {
 	// MaxWorkers caps the sum of max_replicas across a cluster's worker
 	// groups. 0 = no cap.
 	MaxWorkers int
+	// CatalogOnly requires the image to be a Catalog entry (#10); false =
+	// the prefix allowlist alone decides.
+	CatalogOnly bool
+	// Catalog is the image catalog narrowed to the project (#10):
+	// consulted by Check when CatalogOnly is set, and by CatalogEntry to
+	// fill a spec's ray_version and to refuse an engine mismatch.
+	Catalog []core.ImageEntry
+}
+
+// CatalogEntry returns the catalog entry image is, or nil.
+func (a Admission) CatalogEntry(image string) *core.ImageEntry {
+	for i := range a.Catalog {
+		if a.Catalog[i].Matches(image) {
+			return &a.Catalog[i]
+		}
+	}
+	return nil
 }
 
 // SeedRules converts the boot-time flags (`--allowed-images`,
@@ -69,7 +86,11 @@ func (s *Server) admissionFor(ctx context.Context, project string) (Admission, e
 		if rule.MaxWorkers > 0 {
 			out.MaxWorkers = int(rule.MaxWorkers)
 		}
+		if rule.CatalogOnly {
+			out.CatalogOnly = true
+		}
 	}
+	out.Catalog = imagesAvailableTo(p.Images, project)
 	return out, nil
 }
 
@@ -105,6 +126,21 @@ func (a Admission) Check(spec *core.ClusterSpec) *admissionError {
 				reason:  "image_not_allowed",
 				message: fmt.Sprintf("image %q is not in the administrator's allowlist (prefixes: %s)", spec.Image, strings.Join(a.AllowedImagePrefixes, ", ")),
 			}
+		}
+	}
+	// Image catalog (#10): a catalog image must carry the spec's engine;
+	// under catalog_only, only a catalog image runs at all.
+	if entry := a.CatalogEntry(spec.Image); entry != nil {
+		if engine := entry.EngineOrDefault(); spec.Engine != "" && engine != spec.Engine {
+			return &admissionError{
+				reason:  "image_engine_mismatch",
+				message: fmt.Sprintf("image %q is a %s image; the spec's engine is %s", spec.Image, engine, spec.Engine),
+			}
+		}
+	} else if a.CatalogOnly {
+		return &admissionError{
+			reason:  "image_not_in_catalog",
+			message: fmt.Sprintf("image %q is not in the image catalog for project %q (the project admits catalog images only)", spec.Image, spec.Project),
 		}
 	}
 	if a.MaxWorkers > 0 {

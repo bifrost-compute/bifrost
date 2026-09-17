@@ -48,6 +48,10 @@
             },
             "type": "array"
           },
+          "catalog_only": {
+            "description": "Require a cluster/job's image to be an image catalog entry (#10) open to the project; false = `allowed_images` alone decides.",
+            "type": "boolean"
+          },
           "max_document_bytes": {
             "description": "Cap on the raw runtime_env_yaml document size; 0 = the platform default (64 KiB) (#53).",
             "format": "int64",
@@ -1019,6 +1023,39 @@
         ],
         "type": "string"
       },
+      "EnvironmentScan": {
+        "description": "The recorded vulnerability-scan verdict for an environment (#52): an administrator records the outcome of the offline scan workflow (trivy/grype on the base image, pip-audit on the package list) here; the control plane does not scan itself.",
+        "properties": {
+          "status": {
+            "description": "The verdict: clean | failed | pending.",
+            "enum": [
+              "clean",
+              "failed",
+              "pending"
+            ],
+            "type": "string"
+          },
+          "scanned_at": {
+            "description": "When the scan ran.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scanner": {
+            "description": "What produced the verdict (e.g. \"trivy 0.57.0\", \"pip-audit 2.7\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
       "EnvironmentSpec": {
         "description": "A named, governed compute environment in the environment catalog (#52): the base image, pinned packages and env vars a job or cluster gets when its spec names this environment (`RayJobSpec.environment`, `ClusterSpec.environment`). Environments compile to a governed runtime_env (#53); `runtime_env_yaml` is the documented escape hatch. Inert in #52: references are accepted and stored, resolution arrives with the catalog issue.",
         "properties": {
@@ -1103,39 +1140,6 @@
         },
         "required": [
           "name"
-        ],
-        "type": "object"
-      },
-      "EnvironmentScan": {
-        "description": "The recorded vulnerability-scan verdict for an environment (#52): an administrator records the outcome of the offline scan workflow (trivy/grype on the base image, pip-audit on the package list) here; the control plane does not scan itself.",
-        "properties": {
-          "status": {
-            "description": "The verdict: clean | failed | pending.",
-            "enum": [
-              "clean",
-              "failed",
-              "pending"
-            ],
-            "type": "string"
-          },
-          "scanned_at": {
-            "description": "When the scan ran.",
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "scanner": {
-            "description": "What produced the verdict (e.g. \"trivy 0.57.0\", \"pip-audit 2.7\").",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "status"
         ],
         "type": "object"
       },
@@ -1226,6 +1230,256 @@
           "groups",
           "roles",
           "projects"
+        ],
+        "type": "object"
+      },
+      "ImageConfig": {
+        "description": "The image config blob as the OCI image spec defines it: what a container from this image starts with.",
+        "properties": {
+          "cmd": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "entrypoint": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "env": {
+            "description": "Environment variables, split at the first `=`.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "exposed_ports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "user": {
+            "type": "string"
+          },
+          "working_dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "env",
+          "entrypoint",
+          "cmd",
+          "user",
+          "working_dir",
+          "exposed_ports",
+          "labels"
+        ],
+        "type": "object"
+      },
+      "ImageEntry": {
+        "description": "An approved container image (#7/#10): a reference an administrator vetted, with its engine and Ray version spelled out instead of guessed from the tag. Specs still carry `image` as a string; when a project's admission rule is `catalog_only` that string must be an entry's `ref` (or `repo@digest` when pinned), and an entry's `ray_version` fills a spec that leaves it empty. An environment's `base_image` is admitted through the same rule.",
+        "properties": {
+          "description": {
+            "description": "Human-readable summary shown by clients.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "digest": {
+            "description": "Manifest digest `ref` is pinned to (`sha256:\u2026`); empty = unpinned, the tag is followed.",
+            "type": "string"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/Engine",
+            "description": "Engine the image carries; absent = ray."
+          },
+          "name": {
+            "description": "Catalog name clients show and pick.",
+            "type": "string"
+          },
+          "projects": {
+            "description": "Projects that may use this image; empty = every project.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "python_version": {
+            "description": "Interpreter version inside the image, for kernel matching; empty = unknown.",
+            "type": "string"
+          },
+          "ray_version": {
+            "description": "Ray version inside the image (ray engine).",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Image reference the pods run: `registry/repo:tag` or `registry/repo@sha256:\u2026`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "ref"
+        ],
+        "type": "object"
+      },
+      "ImageHistoryEntry": {
+        "description": "One `history` row of the image config \u2014 the instruction that produced a layer (BuildKit/docker record the Dockerfile line in `created_by`), joined to the layer it produced when it produced one. This is the closest an image gets to its Dockerfile.",
+        "properties": {
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "RFC 3339 timestamp when recorded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "empty_layer": {
+            "description": "True for instructions that changed only metadata (ENV, LABEL, CMD, \u2026).",
+            "type": "boolean"
+          },
+          "layer_digest": {
+            "description": "Digest of the layer this step produced; `null` for an empty layer.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "description": "Compressed size of that layer; `null` for an empty layer.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "created_by",
+          "empty_layer"
+        ],
+        "type": "object"
+      },
+      "ImageInspect": {
+        "description": "What a catalog image looks like without pulling it (#10): the manifest and config blob read from its registry \u2014 platform, size, the container config (env, entrypoint, user, labels), the per-layer build history and the layers. One shape, shared with any other console that renders it.",
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ImageConfig"
+          },
+          "digest": {
+            "description": "Digest of the manifest that was inspected (the platform manifest when `reference` resolved to an index).",
+            "type": "string"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/ImageHistoryEntry"
+            },
+            "type": "array"
+          },
+          "layers": {
+            "items": {
+              "$ref": "#/components/schemas/ImageLayer"
+            },
+            "type": "array"
+          },
+          "platforms": {
+            "description": "Every platform the reference offers (one for a single-platform manifest).",
+            "items": {
+              "$ref": "#/components/schemas/ImagePlatform"
+            },
+            "type": "array"
+          },
+          "reference": {
+            "description": "The reference that was inspected, as the catalog entry names it.",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Sum of the inspected manifest's compressed layer sizes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "description": "Which producer filled the document: `registry` (Bifrost read the manifest and config itself).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "digest",
+          "platforms",
+          "size_bytes",
+          "config",
+          "history",
+          "layers",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ImageLayer": {
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "digest",
+          "size_bytes",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "ImagePlatform": {
+        "properties": {
+          "architecture": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "os",
+          "architecture"
         ],
         "type": "object"
       },
@@ -1492,6 +1746,13 @@
             "description": "The environment catalog (#52); empty when none are configured.",
             "items": {
               "$ref": "#/components/schemas/EnvironmentSpec"
+            },
+            "type": "array"
+          },
+          "images": {
+            "description": "The image catalog (#7/#10); empty when none are configured.",
+            "items": {
+              "$ref": "#/components/schemas/ImageEntry"
             },
             "type": "array"
           },
@@ -1813,6 +2074,27 @@
           "head_cpu",
           "head_memory",
           "worker_groups"
+        ],
+        "type": "object"
+      },
+      "ProjectGrant": {
+        "description": "One project the caller holds a scoped grant in, and the roles held\nthere. A client that has to name a project \u2014 the JupyterLab extension\nstarting a cluster, say \u2014 reads this rather than guessing a default.",
+        "properties": {
+          "name": {
+            "description": "The project's name, as `ClusterSpec.project` takes it.",
+            "type": "string"
+          },
+          "roles": {
+            "description": "Snake_case role names held *in this project*: \"viewer\", \"developer\",\n\"operator\", \"admin\". A caller needs \"operator\" (or \"admin\") to create\nor stop a cluster there.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "roles"
         ],
         "type": "object"
       },
@@ -2542,6 +2824,16 @@
               "null"
             ]
           },
+          "images": {
+            "description": "Present replaces the whole image catalog (`[]` clears it) (#7/#10).",
+            "items": {
+              "$ref": "#/components/schemas/ImageEntry"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "prices": {
             "additionalProperties": {
               "format": "double",
@@ -2825,27 +3117,6 @@
           "desired",
           "ready",
           "nodes"
-        ],
-        "type": "object"
-      },
-      "ProjectGrant": {
-        "description": "One project the caller holds a scoped grant in, and the roles held\nthere. A client that has to name a project \u2014 the JupyterLab extension\nstarting a cluster, say \u2014 reads this rather than guessing a default.",
-        "properties": {
-          "name": {
-            "description": "The project's name, as `ClusterSpec.project` takes it.",
-            "type": "string"
-          },
-          "roles": {
-            "description": "Snake_case role names held *in this project*: \"viewer\", \"developer\",\n\"operator\", \"admin\". A caller needs \"operator\" (or \"admin\") to create\nor stop a cluster there.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "name",
-          "roles"
         ],
         "type": "object"
       }
@@ -4219,6 +4490,88 @@
         ]
       }
     },
+    "/api/v1/images": {
+      "get": {
+        "operationId": "list_images",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ImageEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The image catalog, filtered to the images the caller's projects may use"
+          },
+          "401": {
+            "description": "No/invalid token"
+          },
+          "403": {
+            "description": "Missing Read on cluster"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "images"
+        ]
+      }
+    },
+    "/api/v1/images/{name}/inspect": {
+      "get": {
+        "operationId": "inspect_image",
+        "parameters": [
+          {
+            "description": "Image catalog name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageInspect"
+                }
+              }
+            },
+            "description": "The image as its registry describes it"
+          },
+          "401": {
+            "description": "No/invalid token"
+          },
+          "403": {
+            "description": "Missing Read on cluster"
+          },
+          "404": {
+            "description": "No such image, or not open to the caller's projects"
+          },
+          "502": {
+            "description": "The registry could not be reached or refused the read"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "images"
+        ]
+      }
+    },
     "/api/v1/jobs": {
       "get": {
         "operationId": "list_jobs",
@@ -5261,6 +5614,10 @@
     {
       "description": "Governed environment catalog (#52): named base-image + pinned-package sets specs reference by name. Reads mirror the profile catalog's; the catalog itself rides the policy document.",
       "name": "environments"
+    },
+    {
+      "description": "The image catalog (#7/#10): approved image references an administrator maintains in the policy (`PUT /settings/policy` `images`), listed filtered to the caller's projects, and inspected \u2014 manifest, config, layer history \u2014 straight from the registry without pulling. Reads need Read on the cluster target.",
+      "name": "images"
     }
   ]
 }

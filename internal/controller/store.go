@@ -542,6 +542,9 @@ type StoredPolicy struct {
 	// Environments is the environment catalog (#52): named governed
 	// environments a spec may refer to. Empty = no catalog.
 	Environments []core.Environment `json:"environments"`
+	// Images is the approved-image catalog (requirements 7/10): vetted
+	// image references with their engine/Ray version. Empty = none.
+	Images []core.ImageEntry `json:"images"`
 }
 
 // storedPolicyAlias breaks the recursion MarshalJSON would otherwise cause
@@ -573,6 +576,9 @@ func (p StoredPolicy) MarshalJSON() ([]byte, error) {
 	}
 	if a.Environments == nil {
 		a.Environments = []core.Environment{}
+	}
+	if a.Images == nil {
+		a.Images = []core.ImageEntry{}
 	}
 	return json.Marshal(a)
 }
