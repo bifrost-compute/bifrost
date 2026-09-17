@@ -1122,11 +1122,7 @@
           },
           "scan": {
             "$ref": "#/components/schemas/EnvironmentScan",
-            "description": "The scan verdict recorded for this environment; `null` = never scanned.",
-            "type": [
-              "object",
-              "null"
-            ]
+            "description": "The scan verdict recorded for this environment; `null` = never scanned. Absent or `null` in a request means unscanned; the server always writes the field (`null` when there is no verdict)."
           },
           "status": {
             "description": "Lifecycle state: a draft is editable and not yet selectable, published is selectable by specs, deprecated stays resolvable for existing references but should not be picked for new work. Absent = draft.",

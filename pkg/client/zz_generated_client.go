@@ -780,7 +780,7 @@ type EnvironmentSpec struct {
 	// RuntimeEnvYaml Escape hatch: an extra Ray runtime_env YAML document merged in at resolution time, governed by the same validator (#53) a job's own runtime_env_yaml passes. Empty = none.
 	RuntimeEnvYaml *string `json:"runtime_env_yaml,omitempty"`
 
-	// Scan The scan verdict recorded for this environment; `null` = never scanned.
+	// Scan The scan verdict recorded for this environment; `null` = never scanned. Absent or `null` in a request means unscanned; the server always writes the field (`null` when there is no verdict).
 	Scan *EnvironmentScan `json:"scan,omitempty"`
 
 	// Status Lifecycle state: a draft is editable and not yet selectable, published is selectable by specs, deprecated stays resolvable for existing references but should not be picked for new work. Absent = draft.
