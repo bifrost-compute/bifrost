@@ -320,6 +320,7 @@ func cloneStoredPolicy(p StoredPolicy) StoredPolicy {
 	p.Environments = cloneEnvironments(p.Environments)
 	p.Images = cloneImageEntries(p.Images)
 	p.WorkloadIdentity = cloneWorkloadIdentity(p.WorkloadIdentity)
+	p.Namespaces = cloneStringMap(p.Namespaces)
 	return p
 }
 

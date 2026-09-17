@@ -219,6 +219,13 @@ func (s *Server) finishJobSpec(ctx context.Context, id core.ClusterId, spec *cor
 		return "", werr
 	}
 	spec.ServiceAccountResolved = sa
+	// Tenant namespace (#21): the job, its cluster and its submitter land
+	// in the project's namespace, pinned at admission.
+	ns, nerr := s.resolveNamespace(ctx, view.Project)
+	if nerr != nil {
+		return "", nerr
+	}
+	spec.NamespaceResolved = ns
 	spec.EnvironmentResolved = envResolved
 	spec.Image, spec.RayVersion = view.Image, view.RayVersion
 	spec.HeadCpu, spec.HeadMemory = view.HeadCpu, view.HeadMemory

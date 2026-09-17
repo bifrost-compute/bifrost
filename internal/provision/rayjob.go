@@ -71,6 +71,7 @@ func ClusterSpecForJob(id core.ClusterId, spec *core.RayJobSpec) core.ClusterSpe
 		// The job's cluster pods run under the job identity (#20), as does
 		// the submitter (submitterTemplate).
 		ServiceAccountResolved: spec.ServiceAccountResolved,
+		NamespaceResolved:      spec.NamespaceResolved,
 	}
 }
 

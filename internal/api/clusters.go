@@ -503,6 +503,11 @@ func (s *Server) CreateCluster(ctx context.Context, req CreateClusterRequestObje
 	if spec.ServiceAccountResolved, err = s.resolveWorkloadIdentity(ctx, spec.Project, core.WorkloadInteractive); err != nil {
 		return nil, err
 	}
+	// Tenant namespace (#21): where the project's objects live, pinned so
+	// a later mapping edit never moves a running cluster. "" = default.
+	if spec.NamespaceResolved, err = s.resolveNamespace(ctx, spec.Project); err != nil {
+		return nil, err
+	}
 	// Tier-2 owned session clusters: the authenticated caller is always
 	// the recorded owner, overriding any client-supplied value — the body
 	// is untrusted (ownership is who asked, not what they claim). nil

@@ -238,6 +238,10 @@ func (s *Server) DeployService(ctx context.Context, req DeployServiceRequestObje
 	if spec.ServiceAccountResolved, err = s.resolveWorkloadIdentity(ctx, spec.Project, core.WorkloadServing); err != nil {
 		return nil, err
 	}
+	// Tenant namespace (#21), pinned at admission like the identity.
+	if spec.NamespaceResolved, err = s.resolveNamespace(ctx, spec.Project); err != nil {
+		return nil, err
+	}
 
 	// One service per project (requirement 2, plan ruling D8): a project
 	// shares a single RayService, so a second name in the same project is

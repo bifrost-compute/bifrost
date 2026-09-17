@@ -549,6 +549,10 @@ type StoredPolicy struct {
 	// ServiceAccount its workloads run under (#20). Empty = every pod
 	// keeps the namespace default.
 	WorkloadIdentity map[string]core.WorkloadIdentityRule `json:"workload_identity,omitempty"`
+	// Namespaces maps project -> the Kubernetes namespace its workloads
+	// live in (#21, tenant namespaces). Unmapped projects use the control
+	// plane's default workload namespace. Empty = single-namespace.
+	Namespaces map[string]string `json:"namespaces,omitempty"`
 }
 
 // storedPolicyAlias breaks the recursion MarshalJSON would otherwise cause

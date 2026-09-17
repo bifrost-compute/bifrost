@@ -446,6 +446,28 @@
         "target inproc has no Kubernetes",
         "target inproc has no Kubernetes"
       ]
+    },
+    {
+      "n": 21,
+      "title": "Each project's workloads run in their own Kubernetes namespace (hard tenant boundary)",
+      "priority": "HIGH",
+      "tests": 5,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 2,
+      "not_yet_built": 0,
+      "status": "partial",
+      "test_names": [
+        "TestMappingEditNeverMovesAnAdmittedWorkload",
+        "TestNamespaceIsPinnedPerKindAtAdmission",
+        "TestNamespacesSectionValidatesAndReplaces",
+        "TestRayJobLandsInTheTenantNamespace",
+        "TestWorkloadsLandInTheTenantNamespaceWithItsPosture"
+      ],
+      "skip_reasons": [
+        "target inproc has no Kubernetes",
+        "target inproc has no Kubernetes"
+      ]
     }
   ]
 }

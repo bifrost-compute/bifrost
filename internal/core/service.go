@@ -82,6 +82,13 @@ type ServiceSpec struct {
 	// edit is never retroactive. nil = the namespace default (no rule).
 	// Never echoed: views carry no spec.
 	ServiceAccountResolved *string `json:"service_account_resolved,omitempty"`
+	// NamespaceResolved is the Kubernetes namespace this workload's objects
+	// live in (#21): the project's tenant namespace from the policy's
+	// `namespaces` map, resolved at admission and pinned so a later mapping
+	// edit never moves a running workload. "" = the control plane's default
+	// workload namespace (`serve --namespace`), byte-identical to every
+	// spec admitted before tenant namespaces existed. Never echoed.
+	NamespaceResolved string `json:"namespace_resolved,omitempty"`
 }
 
 // serviceSpecAlias breaks the recursion Unmarshal/MarshalJSON would

@@ -1054,6 +1054,9 @@ type PolicyView struct {
 	// Images The image catalog (#7/#10); empty when none are configured.
 	Images *[]ImageEntry `json:"images,omitempty"`
 
+	// Namespaces project → the Kubernetes namespace its clusters, jobs and services live in (#21, tenant namespaces). Unmapped projects use the control plane's default workload namespace. Empty when none are configured or the control plane runs single-namespace.
+	Namespaces *map[string]string `json:"namespaces,omitempty"`
+
 	// Prices resource → $/unit-hour; `null` when no price sheet is configured.
 	Prices *map[string]float64 `json:"prices,omitempty"`
 
@@ -1475,6 +1478,9 @@ type UpdatePolicy struct {
 
 	// Images Present replaces the whole image catalog (`[]` clears it) (#7/#10).
 	Images *[]ImageEntry `json:"images,omitempty"`
+
+	// Namespaces Present replaces the whole project → namespace map (`{}` clears it) (#21). Each value is an existing Kubernetes namespace (RFC 1123 label) the platform created for the project; Bifrost writes its network posture and Pod Security labels into it and applies the project's workloads there. 400 unless the control plane runs with `serve --tenant-namespaces`, and 400 when a mapped project already holds a pool allocation in a different namespace (a Kueue LocalQueue must share its workloads' namespace). Never retroactive: admitted workloads stay where they were placed.
+	Namespaces *map[string]string `json:"namespaces,omitempty"`
 
 	// Prices Present (incl. explicit `null`) replaces/clears the price sheet.
 	Prices *map[string]float64 `json:"prices,omitempty"`

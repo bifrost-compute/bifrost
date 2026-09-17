@@ -1752,6 +1752,16 @@
             },
             "type": "array"
           },
+          "namespaces": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "project \u2192 the Kubernetes namespace its clusters, jobs and services live in (#21, tenant namespaces). Unmapped projects use the control plane's default workload namespace. Empty when none are configured or the control plane runs single-namespace.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "prices": {
             "additionalProperties": {
               "format": "double",
@@ -2837,6 +2847,19 @@
             },
             "type": [
               "array",
+              "null"
+            ]
+          },
+          "namespaces": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Present replaces the whole project \u2192 namespace map (`{}` clears it) (#21). Each value is an existing Kubernetes namespace (RFC 1123 label) the platform created for the project; Bifrost writes its network posture and Pod Security labels into it and applies the project's workloads there. 400 unless the control plane runs with `serve --tenant-namespaces`, and 400 when a mapped project already holds a pool allocation in a different namespace (a Kueue LocalQueue must share its workloads' namespace). Never retroactive: admitted workloads stay where they were placed.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
               "null"
             ]
           },

@@ -390,6 +390,15 @@ func (s *Server) PutAllocation(ctx context.Context, req PutAllocationRequestObje
 	if verr := alloc.Validate(); verr != nil {
 		return nil, badRequest("invalid allocation: " + verr.Error())
 	}
+	// Tenant namespaces (#21): a project's LocalQueue must live where its
+	// workloads do, so an allocation for a mapped project is refused
+	// unless it names that namespace (the PUT of the map checks the
+	// converse).
+	if mapped, err := s.resolveNamespace(ctx, alloc.Project); err != nil {
+		return nil, err
+	} else if mapped != "" && alloc.Namespace != mapped {
+		return nil, badRequest(fmt.Sprintf("invalid allocation: project %q is mapped to namespace %q (policy namespaces), so its allocation must use that namespace, not %q", alloc.Project, mapped, alloc.Namespace))
+	}
 
 	// GPU tenant isolation (#58): tenants = distinct allocation projects
 	// after the upsert (allocations are keyed (pool, project), so the set

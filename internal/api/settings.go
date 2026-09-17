@@ -210,9 +210,11 @@ func policyView(p *controller.StoredPolicy, source string) PolicyView {
 	environments := environmentsToWire(p.Environments)
 	images := imagesToWire(p.Images)
 	workloadIdentity := workloadIdentityToWire(p.WorkloadIdentity)
+	namespaces := namespacesToWire(p.Namespaces)
 	return PolicyView{
 		Images:           &images,
 		WorkloadIdentity: &workloadIdentity,
+		Namespaces:       &namespaces,
 		Prices:           prices,
 		Quotas:           quotas,
 		Budgets:          budgets,
@@ -665,6 +667,19 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 			return nil, err
 		}
 	}
+	var namespaces map[string]string
+	if body.Namespaces != nil {
+		if !s.TenantNamespaces {
+			return nil, badRequest(tenantNamespacesDisabled)
+		}
+		var err error
+		if namespaces, err = namespacesFromWire(*body.Namespaces); err != nil {
+			return nil, err
+		}
+		if err := s.allocationsAgreeWithNamespaces(ctx, namespaces); err != nil {
+			return nil, err
+		}
+	}
 
 	next, err := effectivePolicy(ctx, s.Store, &s.PolicySeed)
 	if err != nil {
@@ -711,6 +726,12 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 	// admitted with (core.ClusterSpec.ServiceAccountResolved).
 	if body.WorkloadIdentity != nil {
 		next.WorkloadIdentity = workloadIdentity
+	}
+	// Tenant namespaces (#21): section-replace, never retroactive — an
+	// admitted workload stays in the namespace it was placed in
+	// (core.ClusterSpec.NamespaceResolved).
+	if body.Namespaces != nil {
+		next.Namespaces = namespaces
 	}
 	// Environments (#52) follow the same section-replace rule as profiles,
 	// admission and storage: a present key replaces the whole catalog (`[]`

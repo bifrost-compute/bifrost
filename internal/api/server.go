@@ -118,6 +118,13 @@ type Server struct {
 	// interpreters, per-worker images, and remote working_dir URIs.
 	RuntimeEnvUngoverned bool
 
+	// TenantNamespaces (#21, `serve --tenant-namespaces`) enables the
+	// policy's project -> namespace map: the section is accepted on PUT and
+	// admission pins the mapped namespace on each spec. Off, the section is
+	// refused (400) and every spec is placed in the default namespace,
+	// which is all a namespaced Role can reach.
+	TenantNamespaces bool
+
 	// admitMu guards admitLocks (issue #44's per-project admission lock —
 	// see clusters.go's withProjectAdmitLock doc comment for what this
 	// does and does NOT cover).

@@ -189,14 +189,39 @@ AWS and Terraform.
 
 ## 5. Follow-ons (not built)
 
-### 5.1 One namespace per project
+### 5.1 One namespace per project — built 2026-09-17 (row 21)
 
-Today every workload lands in the control plane's `--namespace`. Adopting
-the namespace platform's boundary means the live client takes a namespace
-per project (about 33 namespace references in `internal/provision/live`,
-plus the posture objects applied per namespace and RBAC for Bifrost's own
-account across them). It gives hard quota and NetworkPolicy boundaries per
-group, offboarding by namespace deletion, and closes the residual in §3.
+`serve --tenant-namespaces` enables the policy row's `namespaces` section
+(project → namespace; 400 when the flag is off). Admission pins
+`NamespaceResolved` on every spec, never retroactively. The live client:
+
+- places the RayCluster, RayJob (cluster and submitter) and RayService in
+  the pinned namespace and writes the default-deny / tenant-allow posture
+  and PSS labels there, after labelling its own namespace
+  `bifrost.dev/control-plane=true` so the tenant-allow admits the gateway
+  across the boundary;
+- locates by-id objects (observe, suspend, terminate, nodes, logs, events)
+  through an id → namespace cache warmed by apply and list, falling back to
+  a cluster-wide list on the managed-by label — the restart-recovery path;
+- lists across all namespaces, and reaps a vanished cluster's per-cluster
+  policies wherever they were left;
+- keeps single-namespace mode byte-identical: no flag, no pin honoured, no
+  cross-namespace call, so a namespaced Role keeps working.
+
+Kueue constraint: a LocalQueue is namespaced, so a project's allocation
+must live in its mapped namespace. The map PUT refuses a contradicting
+allocation and the allocation PUT refuses a contradicting namespace.
+
+RBAC: the Ray rules become a ClusterRole (bifrost-pack `tenancy.enabled`),
+and `namespaces: get, patch` loses its `resourceNames` narrowing. The
+tenant namespaces themselves are the platform's to create, label for
+ResourceQuota and Pod Identity, and delete at offboarding; Bifrost requires
+them to exist and reports a missing one as a backend error on the apply.
+
+Not done here: the notebook-side allow still keys on the single `jupyter`
+namespace (`provision.NotebookNamespace`); a per-tenant JupyterHub
+namespace needs the owner allow to take the notebook namespace from the
+policy too.
 
 ### 5.2 Result prefix for jobs
 

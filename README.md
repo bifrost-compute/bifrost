@@ -33,6 +33,10 @@ gate where identity, quota, and policy are enforced on every request.
   ServiceAccount each project's clusters, jobs and services run under, so a
   cloud IAM role (EKS Pod Identity, IRSA, GKE Workload Identity) binds to the
   project's pods and no static credential is needed anywhere.
+- **A namespace per project** — with `--tenant-namespaces`, administrators
+  map each project to the Kubernetes namespace the platform created for it,
+  and Bifrost places that project's workloads and network posture there:
+  quota, identity bindings and offboarding all key on the namespace.
 - **Fair-share capacity** — Kueue-backed resource pools with quotas, weights,
   and borrowing between groups.
 - **Cost and usage visibility** — who requested what, for how long, and what

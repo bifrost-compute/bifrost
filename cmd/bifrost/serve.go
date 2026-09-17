@@ -63,6 +63,7 @@ type serveOptions struct {
 	GatewayExternalBase     string
 	ServicesPerProject      int
 	RuntimeEnvUngoverned    bool
+	TenantNamespaces        bool
 	PackageProxy            string
 }
 
@@ -116,6 +117,8 @@ func newServeCmd() *cobra.Command {
 		"Scheme (and optional prefix) clients reach the gateway through, e.g. https://, used to build gateway_url. Empty = not reported")
 	f.IntVar(&opts.ServicesPerProject, "services-per-project", 1,
 		"Cap on concurrently deployed services per project (requirement 2); deploys beyond it answer 409")
+	f.BoolVar(&opts.TenantNamespaces, "tenant-namespaces", false,
+		"Enable per-project tenant namespaces (#21): the policy's `namespaces` map places a project's clusters, jobs and services in its own namespace; needs cluster-wide RBAC (the chart's tenancy.clusterWide)")
 	f.BoolVar(&opts.RuntimeEnvUngoverned, "allow-ungoverned-runtime-env", false,
 		"DANGER: pass runtime_env_yaml verbatim into the RayJob CR without the #53 governance validation "+
 			"(arbitrary pip indexes, interpreters, per-worker images and remote URIs become reachable from cluster nodes). "+
@@ -237,6 +240,7 @@ func buildServer(ctx context.Context, opts serveOptions) (*builtServer, error) {
 		GatewayExternalBase:  opts.GatewayExternalBase,
 		ServicesPerProject:   opts.ServicesPerProject,
 		RuntimeEnvUngoverned: opts.RuntimeEnvUngoverned,
+		TenantNamespaces:     opts.TenantNamespaces,
 		Admission: api.Admission{
 			AllowedImagePrefixes: api.ParseImagePrefixes(opts.AllowedImages),
 			MaxWorkers:           opts.MaxWorkers,
@@ -256,11 +260,18 @@ func buildServer(ctx context.Context, opts serveOptions) (*builtServer, error) {
 		if err != nil {
 			return fail(fmt.Errorf("--package-proxy: %w", err))
 		}
-		c, err := live.NewClient(restCfg, opts.Namespace, opts.Autoscaling, live.WithScheduling(sched), live.WithPackageProxy(proxy))
+		liveOpts := []live.Option{live.WithScheduling(sched), live.WithPackageProxy(proxy)}
+		if opts.TenantNamespaces {
+			liveOpts = append(liveOpts, live.WithTenantNamespaces())
+		}
+		c, err := live.NewClient(restCfg, opts.Namespace, opts.Autoscaling, liveOpts...)
 		if err != nil {
 			return fail(err)
 		}
 		liveClient = c
+		if opts.TenantNamespaces {
+			slog.Info("tenant namespaces enabled: policy `namespaces` places projects in their own namespaces", "default_namespace", opts.Namespace)
+		}
 		if !sched.IsZero() {
 			slog.Info("tenant pod scheduling", "scheduling", sched.String())
 		}

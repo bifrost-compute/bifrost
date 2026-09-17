@@ -36,6 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -64,6 +65,19 @@ type Client struct {
 	clientset   kubernetes.Interface
 	namespace   string
 	autoscaling bool
+	// tenantNamespaces (#21, `serve --tenant-namespaces`) lets a spec pin
+	// the namespace its objects live in (core.ClusterSpec.NamespaceResolved,
+	// the project's tenant namespace from the policy's `namespaces` map).
+	// Off, every object lives in namespace and every read is scoped to it —
+	// today's behaviour, and the one a namespaced Role permits. On, reads
+	// span every namespace (a ClusterRole) and by-id operations locate the
+	// object first (see getManaged / locate).
+	tenantNamespaces bool
+	// located caches id -> namespace for objects this client applied or
+	// listed, so a by-id read in tenant mode is one Get, not a cluster-wide
+	// list. A miss (restart, object moved) falls back to the list; a stale
+	// entry is dropped on NotFound.
+	located sync.Map
 	// scheduling is stamped onto every tenant pod template this client
 	// applies (provision.Scheduling): deployment-wide placement such as
 	// the tolerations a tainted user node group demands.
@@ -125,6 +139,15 @@ func WithScheduling(s provision.Scheduling) Option {
 	return func(c *Client) { c.scheduling = s }
 }
 
+// WithTenantNamespaces enables per-project tenant namespaces (#21): a
+// workload spec's NamespaceResolved is honoured, reads span every
+// namespace, and the control plane's own namespace is labelled so the
+// tenant-allow policy in each project namespace admits it. Requires the
+// chart's cluster-wide RBAC.
+func WithTenantNamespaces() Option {
+	return func(c *Client) { c.tenantNamespaces = true }
+}
+
 // WithPackageProxy sets the platform package proxy (`serve
 // --package-proxy`, issue #56): workloads whose runtime env installs
 // packages get a per-workload egress NetworkPolicy to it under the
@@ -170,10 +193,122 @@ var _ provision.ServiceProvisioner = (*ServiceClient)(nil)
 // NewServiceClient returns c's ServiceProvisioner façade.
 func NewServiceClient(c *Client) *ServiceClient { return &ServiceClient{c} }
 
-func (c *Client) apiBaseURL(id string) string {
+func apiBaseURL(namespace, id string) string {
 	// KubeRay's head service is always named "<id>-head-svc"; the
 	// dashboard / Ray Job Submission API listens on 8265.
-	return fmt.Sprintf("http://%s-head-svc.%s.svc:8265", id, c.namespace)
+	return fmt.Sprintf("http://%s-head-svc.%s.svc:8265", id, namespace)
+}
+
+// nsFor is the namespace a workload's objects live in: the namespace its
+// spec pinned at admission when tenant namespaces are on, else the
+// client's default. A pinned namespace is ignored in single-namespace
+// mode on purpose — a namespaced Role cannot reach anywhere else, so the
+// policy PUT that would set one is refused there (api.Server.TenantNamespaces).
+func (c *Client) nsFor(pinned string) string {
+	if c.tenantNamespaces && pinned != "" {
+		return pinned
+	}
+	return c.namespace
+}
+
+// listScope is the namespace bound of a managed-object list: the default
+// namespace, or every namespace in tenant mode.
+func (c *Client) listScope() client.ListOption {
+	if c.tenantNamespaces {
+		return client.InNamespace("")
+	}
+	return client.InNamespace(c.namespace)
+}
+
+func (c *Client) remember(id, namespace string) { c.located.Store(id, namespace) }
+func (c *Client) forget(id string)              { c.located.Delete(id) }
+
+// knownNamespace is the namespace id was last seen in, else the default —
+// for callers without a context (MetricsEndpoint, DashboardApiBase) and
+// for deletes of objects that may already be gone.
+func (c *Client) knownNamespace(id string) string {
+	if ns, ok := c.cached(id); ok {
+		return ns
+	}
+	return c.namespace
+}
+
+// cached is the located-cache read; the map only ever holds strings.
+func (c *Client) cached(id string) (string, bool) {
+	v, ok := c.located.Load(id)
+	if !ok {
+		return "", false
+	}
+	ns, isString := v.(string)
+	return ns, isString
+}
+
+// errNotLocated is locate's "no managed object of that name anywhere".
+var errNotLocated = apierrors.NewNotFound(schema.GroupResource{Group: "ray.io", Resource: "managed"}, "")
+
+// locate returns the namespace holding the managed object named id, of
+// the kind list is for. Single-namespace mode answers the default without
+// a call. Tenant mode answers from the cache, else lists the kind across
+// every namespace by the managed-by label and matches the name — the
+// restart-recovery path (observation over memory: the store never holds a
+// namespace the cluster does not). Not found anywhere is errNotLocated.
+func (c *Client) locate(ctx context.Context, id string, list client.ObjectList) (string, error) {
+	if !c.tenantNamespaces {
+		return c.namespace, nil
+	}
+	if ns, ok := c.cached(id); ok {
+		return ns, nil
+	}
+	if err := c.c.List(ctx, list, client.InNamespace(""), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
+		return "", err
+	}
+	items, err := meta.ExtractList(list)
+	if err != nil {
+		return "", err
+	}
+	for _, item := range items {
+		if o, ok := item.(client.Object); ok && o.GetName() == id {
+			c.remember(id, o.GetNamespace())
+			return o.GetNamespace(), nil
+		}
+	}
+	return "", errNotLocated
+}
+
+// locateOrDefault is locate for callers whose operation is a harmless
+// no-op in the wrong namespace (deletes, event and log reads of a gone
+// cluster): not found anywhere answers the default namespace.
+func (c *Client) locateOrDefault(ctx context.Context, id string, list client.ObjectList) (string, error) {
+	ns, err := c.locate(ctx, id, list)
+	if err == nil {
+		return ns, nil
+	}
+	if apierrors.IsNotFound(err) {
+		return c.namespace, nil
+	}
+	return "", err
+}
+
+// getManaged reads the managed object named id into obj, locating its
+// namespace first in tenant mode. A cached namespace that no longer holds
+// the object is dropped and the lookup repeated once. NotFound anywhere is
+// a NotFound error, so callers keep their apierrors.IsNotFound checks.
+func (c *Client) getManaged(ctx context.Context, id string, obj client.Object, list client.ObjectList) error {
+	if !c.tenantNamespaces {
+		return c.c.Get(ctx, client.ObjectKey{Namespace: c.namespace, Name: id}, obj)
+	}
+	if ns, ok := c.cached(id); ok {
+		err := c.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: id}, obj)
+		if err == nil || !apierrors.IsNotFound(err) {
+			return err
+		}
+		c.forget(id)
+	}
+	ns, err := c.locate(ctx, id, list)
+	if err != nil {
+		return err
+	}
+	return c.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: id}, obj)
 }
 
 func serviceURL(namespace, name string) string {
@@ -256,15 +391,15 @@ func (c *Client) applyNetworkPolicy(ctx context.Context, namespace string, polic
 // id (kuberay_client.rs:211-234): cluster pods may talk to each other, and
 // to nothing else. Skipped under an admin-managed default-deny, same as
 // the namespace posture — Bifrost never widens an admin posture.
-func (c *Client) ensureClusterAllow(ctx context.Context, id string, owner *string) error {
-	deny, err := c.adminManagedDeny(ctx, c.namespace)
+func (c *Client) ensureClusterAllow(ctx context.Context, namespace, id string, owner *string) error {
+	deny, err := c.adminManagedDeny(ctx, namespace)
 	if err != nil {
 		return err
 	}
 	if deny {
 		return nil
 	}
-	return c.applyNetworkPolicy(ctx, c.namespace, provision.ClusterAllowNetworkPolicy(id, owner))
+	return c.applyNetworkPolicy(ctx, namespace, provision.ClusterAllowNetworkPolicy(id, owner))
 }
 
 // ensureStorageSourcesExist fails fast when an object the spec's storage
@@ -274,8 +409,8 @@ func (c *Client) ensureClusterAllow(ctx context.Context, id string, owner *strin
 // claim). The check is METADATA ONLY: the Get asks for a
 // PartialObjectMetadata, so a Secret's data never reaches Bifrost's
 // process (RBAC grants `secrets: get`, and this is the only use of it).
-func (c *Client) ensureStorageSourcesExist(ctx context.Context, storage []core.ResolvedStorage) error {
-	return ensureStorageSourcesExist(ctx, c.c, c.namespace, storage)
+func (c *Client) ensureStorageSourcesExist(ctx context.Context, namespace string, storage []core.ResolvedStorage) error {
+	return ensureStorageSourcesExist(ctx, c.c, namespace, storage)
 }
 
 func ensureStorageSourcesExist(ctx context.Context, c client.Client, namespace string, storage []core.ResolvedStorage) error {
@@ -309,8 +444,8 @@ func ensureStorageSourcesExist(ctx context.Context, c client.Client, namespace s
 // like the storage check: Bifrost never reads the account's tokens or
 // binds anything to it — the platform owns the account and its cloud IAM
 // binding. nil names nothing (the namespace default) and passes.
-func (c *Client) ensureServiceAccountExists(ctx context.Context, serviceAccount *string) error {
-	return ensureServiceAccountExists(ctx, c.c, c.namespace, serviceAccount)
+func (c *Client) ensureServiceAccountExists(ctx context.Context, namespace string, serviceAccount *string) error {
+	return ensureServiceAccountExists(ctx, c.c, namespace, serviceAccount)
 }
 
 func ensureServiceAccountExists(ctx context.Context, c client.Client, namespace string, serviceAccount *string) error {
@@ -333,9 +468,9 @@ func ensureServiceAccountExists(ctx context.Context, c client.Client, namespace 
 // per-workload egress policies a cluster may have carried (autoscaler,
 // package proxy). Idempotent: already-gone is success. Ported from
 // kuberay_client.rs:239-256.
-func (c *Client) deleteClusterAllow(ctx context.Context, id string) error {
+func (c *Client) deleteClusterAllow(ctx context.Context, namespace, id string) error {
 	for _, name := range []string{provision.ClusterAllowPolicyName(id), provision.AutoscalerPolicyName(id), provision.PackageProxyPolicyName(id)} {
-		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: c.namespace}}
+		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
 		if err := c.c.Delete(ctx, np); err != nil && !apierrors.IsNotFound(err) {
 			return wrapErr(err)
 		}
@@ -351,8 +486,8 @@ func (c *Client) deleteClusterAllow(ctx context.Context, id string) error {
 // --ray-autoscaling that cannot read the `kubernetes` EndpointSlice (RBAC) would
 // otherwise provision clusters whose autoscaler dies quietly, which is the
 // failure this exists to end. So the cluster gets a readable error instead.
-func (c *Client) ensureAutoscalerEgress(ctx context.Context, id string) error {
-	deny, err := c.adminManagedDeny(ctx, c.namespace)
+func (c *Client) ensureAutoscalerEgress(ctx context.Context, namespace, id string) error {
+	deny, err := c.adminManagedDeny(ctx, namespace)
 	if err != nil {
 		return err
 	}
@@ -363,7 +498,7 @@ func (c *Client) ensureAutoscalerEgress(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return c.applyNetworkPolicy(ctx, c.namespace, provision.AutoscalerEgressNetworkPolicy(id, api))
+	return c.applyNetworkPolicy(ctx, namespace, provision.AutoscalerEgressNetworkPolicy(id, api))
 }
 
 // ensurePackageProxyEgress applies the per-workload egress policy that lets
@@ -378,18 +513,18 @@ func (c *Client) ensureAutoscalerEgress(ctx context.Context, id string) error {
 // cluster's pinned environment resolution (Ray has no cluster-level
 // runtime_env, but the resolution is the cluster-wide default jobs run
 // with, and Ray's agent installs its packages on the cluster's nodes).
-func (c *Client) ensurePackageProxyEgress(ctx context.Context, id, runtimeEnvYaml string) error {
+func (c *Client) ensurePackageProxyEgress(ctx context.Context, namespace, id, runtimeEnvYaml string) error {
 	if c.packageProxy == nil || !provision.RuntimeEnvInstallsPackages(runtimeEnvYaml) {
 		return nil
 	}
-	deny, err := c.adminManagedDeny(ctx, c.namespace)
+	deny, err := c.adminManagedDeny(ctx, namespace)
 	if err != nil {
 		return err
 	}
 	if deny {
 		return nil
 	}
-	return c.applyNetworkPolicy(ctx, c.namespace, provision.PackageProxyEgressNetworkPolicy(id, c.packageProxy))
+	return c.applyNetworkPolicy(ctx, namespace, provision.PackageProxyEgressNetworkPolicy(id, c.packageProxy))
 }
 
 // apiServerEndpoint reads (and caches) the `kubernetes` EndpointSlice in
@@ -434,22 +569,38 @@ func (c *Client) apiServerEndpoint(ctx context.Context) (provision.APIServerEndp
 // Idempotent server-side apply throughout. Ported from
 // kuberay_client.rs:282-341.
 func (c *Client) EnsureNamespacePosture(ctx context.Context) error {
-	deny, err := c.adminManagedDeny(ctx, c.namespace)
+	return c.ensurePostureIn(ctx, c.namespace)
+}
+
+// ensurePostureIn is EnsureNamespacePosture for one namespace: the default
+// workload namespace, or a project's tenant namespace (#21). A tenant
+// namespace must already exist — the platform creates it, like the
+// ServiceAccounts a workload identity names — and gets the same posture;
+// the control plane's own namespace is additionally labelled so the
+// tenant-allow policy written there admits Bifrost's pods across the
+// namespace boundary (provision.ControlPlaneNamespaceLabel).
+func (c *Client) ensurePostureIn(ctx context.Context, namespace string) error {
+	if namespace != c.namespace {
+		if err := c.ensureControlPlaneNamespaceLabel(ctx); err != nil {
+			return err
+		}
+	}
+	deny, err := c.adminManagedDeny(ctx, namespace)
 	if err != nil {
 		return err
 	}
 	if !deny {
 		for _, policy := range []*networkingv1.NetworkPolicy{provision.DefaultDenyNetworkPolicy(), provision.TenantAllowNetworkPolicy()} {
-			if err := c.applyNetworkPolicy(ctx, c.namespace, policy); err != nil {
+			if err := c.applyNetworkPolicy(ctx, namespace, policy); err != nil {
 				return err
 			}
 		}
 	}
 
 	var ns corev1.Namespace
-	if err := c.c.Get(ctx, client.ObjectKey{Name: c.namespace}, &ns); err != nil {
+	if err := c.c.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
-			return provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: fmt.Sprintf("namespace %s not found", c.namespace)}
+			return provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: fmt.Sprintf("namespace %s not found", namespace)}
 		}
 		return wrapErr(err)
 	}
@@ -459,7 +610,7 @@ func (c *Client) EnsureNamespacePosture(ctx context.Context) error {
 	}
 	patch := &corev1.Namespace{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
-		ObjectMeta: metav1.ObjectMeta{Name: c.namespace, Labels: provision.NamespacePSSLabels()},
+		ObjectMeta: metav1.ObjectMeta{Name: namespace, Labels: provision.NamespacePSSLabels()},
 	}
 	// No ForceOwnership: if another manager owns the enforce label with a
 	// conflicting (looser) value, the conflict error surfaces the
@@ -467,6 +618,33 @@ func (c *Client) EnsureNamespacePosture(ctx context.Context) error {
 	// Rust reference's `PatchParams::apply` without `.force()` here).
 	return wrapErr(applySSA(ctx, c.c, patch, client.FieldOwner(provision.FieldManager)))
 }
+
+// ensureControlPlaneNamespaceLabel stamps provision.ControlPlaneNamespaceLabel
+// on the control plane's own namespace (the client's default namespace,
+// where the chart deploys Bifrost). The tenant-allow policy in a project
+// namespace admits control-plane pods only from a namespace carrying this
+// label, so without it a cross-namespace cluster's head would be
+// unreachable from the gateway. Idempotent SSA on one label; done once
+// per process (sync.Once semantics via the cache key "").
+func (c *Client) ensureControlPlaneNamespaceLabel(ctx context.Context) error {
+	if _, done := c.located.Load(controlPlaneLabelledKey); done {
+		return nil
+	}
+	patch := &corev1.Namespace{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{Name: c.namespace, Labels: map[string]string{provision.ControlPlaneNamespaceLabel: "true"}},
+	}
+	if err := applySSA(ctx, c.c, patch, client.FieldOwner(provision.FieldManager)); err != nil {
+		return wrapErr(err)
+	}
+	c.located.Store(controlPlaneLabelledKey, c.namespace)
+	return nil
+}
+
+// controlPlaneLabelledKey is the located-cache sentinel recording that the
+// control-plane namespace label has been ensured this process. No workload
+// id can collide with it: ids are RFC 1123 names, never empty.
+const controlPlaneLabelledKey = ""
 
 // ---------------------------------------------------------------------------
 // Provisioner: cluster lifecycle
@@ -495,20 +673,29 @@ func (c *Client) Apply(ctx context.Context, id core.ClusterId, spec *core.Cluste
 	// The per-cluster intra-tenant allow goes in first, so the cluster's
 	// pods are never up under the default-deny without their own allow
 	// (head<->worker traffic would stall the rollout).
-	if err := c.ensureClusterAllow(ctx, string(id), spec.Owner); err != nil {
+	ns := c.nsFor(spec.NamespaceResolved)
+	// A tenant namespace (#21) gets the namespace posture here: the
+	// reconciler's EnsureNamespacePosture call covers the default
+	// namespace only, and the cross-namespace allow depends on it.
+	if ns != c.namespace {
+		if err := c.ensurePostureIn(ctx, ns); err != nil {
+			return provision.ApplyResponse{}, err
+		}
+	}
+	if err := c.ensureClusterAllow(ctx, ns, string(id), spec.Owner); err != nil {
 		return provision.ApplyResponse{}, err
 	}
-	if err := c.ensureStorageSourcesExist(ctx, spec.StorageResolved); err != nil {
+	if err := c.ensureStorageSourcesExist(ctx, ns, spec.StorageResolved); err != nil {
 		return provision.ApplyResponse{}, err
 	}
-	if err := c.ensureServiceAccountExists(ctx, spec.ServiceAccountResolved); err != nil {
+	if err := c.ensureServiceAccountExists(ctx, ns, spec.ServiceAccountResolved); err != nil {
 		return provision.ApplyResponse{}, err
 	}
 	// The same rule RayClusterFor applies (provision.EffectiveAutoscaling):
 	// whenever the sidecar will run, it must be able to reach the API
 	// server, or it dies on a connect timeout and the cluster never scales.
 	if provision.EffectiveAutoscaling(c.autoscaling, queue) {
-		if err := c.ensureAutoscalerEgress(ctx, string(id)); err != nil {
+		if err := c.ensureAutoscalerEgress(ctx, ns, string(id)); err != nil {
 			return provision.ApplyResponse{}, err
 		}
 	}
@@ -519,18 +706,19 @@ func (c *Client) Apply(ctx context.Context, id core.ClusterId, spec *core.Cluste
 	if spec.EnvironmentResolved != nil {
 		clusterRuntimeEnv = spec.EnvironmentResolved.RuntimeEnvYaml
 	}
-	if err := c.ensurePackageProxyEgress(ctx, string(id), clusterRuntimeEnv); err != nil {
+	if err := c.ensurePackageProxyEgress(ctx, ns, string(id), clusterRuntimeEnv); err != nil {
 		return provision.ApplyResponse{}, err
 	}
 	manifest, err := provision.RayClusterForScheduled(id, spec, c.autoscaling, generation, queue, c.scheduling)
 	if err != nil {
 		return provision.ApplyResponse{}, provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: err.Error()}
 	}
-	manifest.Namespace = c.namespace
+	manifest.Namespace = ns
 	if err := applySSA(ctx, c.c, manifest, client.FieldOwner(provision.FieldManager), client.ForceOwnership); err != nil {
 		return provision.ApplyResponse{}, wrapErr(err)
 	}
-	url := c.apiBaseURL(string(id))
+	c.remember(string(id), ns)
+	url := apiBaseURL(ns, string(id))
 	return provision.ApplyResponse{Generation: generation, ApiBaseUrl: &url}, nil
 }
 
@@ -538,25 +726,57 @@ func (c *Client) Apply(ctx context.Context, id core.ClusterId, spec *core.Cluste
 // policy. Idempotent: already-gone is success. Ported from
 // kuberay_client.rs:421-430.
 func (c *Client) Terminate(ctx context.Context, id core.ClusterId) error {
-	rc := &rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: string(id), Namespace: c.namespace}}
+	ns, err := c.locateOrDefault(ctx, string(id), &rayv1.RayClusterList{})
+	if err != nil {
+		return wrapErr(err)
+	}
+	rc := &rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: string(id), Namespace: ns}}
 	if err := c.c.Delete(ctx, rc); err != nil && !apierrors.IsNotFound(err) {
 		return wrapErr(err)
 	}
-	return c.deleteClusterAllow(ctx, string(id))
+	c.forget(string(id))
+	return c.deleteClusterAllow(ctx, ns, string(id))
 }
 
 // ReapNetworkPolicies deletes id's per-cluster allow policy — a backstop
 // for a RayCluster CR that has already vanished (Terminate would then
 // never fire). Ported from kuberay_client.rs:432-437.
 func (c *Client) ReapNetworkPolicies(ctx context.Context, id core.ClusterId) error {
-	return c.deleteClusterAllow(ctx, string(id))
+	if err := c.deleteClusterAllow(ctx, c.knownNamespace(string(id)), string(id)); err != nil {
+		return err
+	}
+	if !c.tenantNamespaces {
+		return nil
+	}
+	// The CR is gone, so nothing locates its namespace; after a restart the
+	// cache is empty too. Find the per-cluster policies wherever they are.
+	var list networkingv1.NetworkPolicyList
+	if err := c.c.List(ctx, &list, client.InNamespace(""), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
+		return wrapErr(err)
+	}
+	names := map[string]bool{provision.ClusterAllowPolicyName(string(id)): true, provision.AutoscalerPolicyName(string(id)): true, provision.PackageProxyPolicyName(string(id)): true}
+	for i := range list.Items {
+		if names[list.Items[i].Name] {
+			if err := c.c.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return wrapErr(err)
+			}
+		}
+	}
+	return nil
 }
 
 // setSuspend flips only spec.suspend via a JSON merge patch — see
 // [provision.SuspendPatch]'s doc comment for why this is not a partial SSA
 // apply. Ported from kuberay_client.rs:138-148.
 func (c *Client) setSuspend(ctx context.Context, id core.ClusterId, suspend bool) error {
-	rc := &rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: string(id), Namespace: c.namespace}}
+	ns, err := c.locate(ctx, string(id), &rayv1.RayClusterList{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return provision.ProvisionError{Kind: provision.ProvisionErrNotFound, ClusterID: id}
+		}
+		return wrapErr(err)
+	}
+	rc := &rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: string(id), Namespace: ns}}
 	patch := client.RawPatch(types.MergePatchType, provision.SuspendPatch(suspend))
 	if err := c.c.Patch(ctx, rc, patch); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -579,7 +799,7 @@ func (c *Client) Resume(ctx context.Context, id core.ClusterId) error {
 // [provision.ObservedCluster]. Ported from kuberay_client.rs:447-469.
 func (c *Client) Observe(ctx context.Context, id core.ClusterId) (provision.ObservedCluster, error) {
 	var rc rayv1.RayCluster
-	if err := c.c.Get(ctx, client.ObjectKey{Namespace: c.namespace, Name: string(id)}, &rc); err != nil {
+	if err := c.getManaged(ctx, string(id), &rc, &rayv1.RayClusterList{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			return provision.ObservedCluster{}, provision.ProvisionError{Kind: provision.ProvisionErrNotFound, ClusterID: id}
 		}
@@ -589,7 +809,7 @@ func (c *Client) Observe(ctx context.Context, id core.ClusterId) (provision.Obse
 	if fp, ok := provision.FingerprintFromRayCluster(&rc.Spec); ok {
 		fpPtr = &fp
 	}
-	url := c.apiBaseURL(string(id))
+	url := apiBaseURL(rc.Namespace, string(id))
 	return provision.ObservedCluster{
 		ID:                 id,
 		State:              provision.StatusToState(rc.Status),
@@ -603,17 +823,18 @@ func (c *Client) Observe(ctx context.Context, id core.ClusterId) (provision.Obse
 // Ported from kuberay_client.rs:471-492.
 func (c *Client) List(ctx context.Context) ([]provision.ObservedCluster, error) {
 	var list rayv1.RayClusterList
-	if err := c.c.List(ctx, &list, client.InNamespace(c.namespace), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
+	if err := c.c.List(ctx, &list, c.listScope(), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
 		return nil, wrapErr(err)
 	}
 	out := make([]provision.ObservedCluster, 0, len(list.Items))
 	for i := range list.Items {
 		rc := &list.Items[i]
+		c.remember(rc.Name, rc.Namespace)
 		var fpPtr *string
 		if fp, ok := provision.FingerprintFromRayCluster(&rc.Spec); ok {
 			fpPtr = &fp
 		}
-		url := c.apiBaseURL(rc.Name)
+		url := apiBaseURL(rc.Namespace, rc.Name)
 		out = append(out, provision.ObservedCluster{
 			ID:                 core.ClusterId(rc.Name),
 			State:              provision.StatusToState(rc.Status),
@@ -628,13 +849,13 @@ func (c *Client) List(ctx context.Context) ([]provision.ObservedCluster, error) 
 // MetricsEndpoint returns the Ray head's Prometheus metrics endpoint.
 // Ported from kuberay_client.rs:494-499.
 func (c *Client) MetricsEndpoint(id core.ClusterId) (string, bool) {
-	return c.apiBaseURL(string(id)) + "/metrics", true
+	return apiBaseURL(c.knownNamespace(string(id)), string(id)) + "/metrics", true
 }
 
 // DashboardApiBase returns the cluster's native Ray dashboard / Job
 // Submission API base URL. Ported from kuberay_client.rs:501-506.
 func (c *Client) DashboardApiBase(id core.ClusterId) (string, bool) {
-	return c.apiBaseURL(string(id)), true
+	return apiBaseURL(c.knownNamespace(string(id)), string(id)), true
 }
 
 // ClusterNodes reads the RayCluster + the pods KubeRay owns for it
@@ -644,14 +865,14 @@ func (c *Client) DashboardApiBase(id core.ClusterId) (string, bool) {
 // Ported from kuberay_client.rs:508-536.
 func (c *Client) ClusterNodes(ctx context.Context, id core.ClusterId) (*core.ClusterNodes, error) {
 	var rc rayv1.RayCluster
-	if err := c.c.Get(ctx, client.ObjectKey{Namespace: c.namespace, Name: string(id)}, &rc); err != nil {
+	if err := c.getManaged(ctx, string(id), &rc, &rayv1.RayClusterList{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, provision.ProvisionError{Kind: provision.ProvisionErrNotFound, ClusterID: id}
 		}
 		return nil, wrapErr(err)
 	}
 	var pods corev1.PodList
-	if err := c.c.List(ctx, &pods, client.InNamespace(c.namespace), client.MatchingLabels{provision.RayClusterLabel: string(id)}); err != nil {
+	if err := c.c.List(ctx, &pods, client.InNamespace(rc.Namespace), client.MatchingLabels{provision.RayClusterLabel: string(id)}); err != nil {
 		return nil, wrapErr(err)
 	}
 	nodes := provision.NodeBreakdown(string(id), &rc, pods.Items)
@@ -663,8 +884,12 @@ func (c *Client) ClusterNodes(ctx context.Context, id core.ClusterId) (*core.Clu
 // `<id>-` name-prefix match); filtering happens in the pure helper. Ported
 // from kuberay_client.rs:538-556.
 func (c *Client) ClusterEvents(ctx context.Context, id core.ClusterId) (*core.ClusterEvents, error) {
+	ns, err := c.locateOrDefault(ctx, string(id), &rayv1.RayClusterList{})
+	if err != nil {
+		return nil, wrapErr(err)
+	}
 	var list corev1.EventList
-	if err := c.c.List(ctx, &list, client.InNamespace(c.namespace)); err != nil {
+	if err := c.c.List(ctx, &list, client.InNamespace(ns)); err != nil {
 		return nil, wrapErr(err)
 	}
 	events := provision.EventsFromK8s(string(id), list.Items)
@@ -676,8 +901,12 @@ func (c *Client) ClusterEvents(ctx context.Context, id core.ClusterId) (*core.Cl
 // returns (nil, nil) (404), never an arbitrary namespace pod. Ported from
 // kuberay_client.rs:558-635.
 func (c *Client) ClusterLogs(ctx context.Context, id core.ClusterId, pod *string, tail uint32) (*core.ClusterLogs, error) {
+	ns, err := c.locateOrDefault(ctx, string(id), &rayv1.RayClusterList{})
+	if err != nil {
+		return nil, wrapErr(err)
+	}
 	var pods corev1.PodList
-	if err := c.c.List(ctx, &pods, client.InNamespace(c.namespace), client.MatchingLabels{provision.RayClusterLabel: string(id)}); err != nil {
+	if err := c.c.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabels{provision.RayClusterLabel: string(id)}); err != nil {
 		return nil, wrapErr(err)
 	}
 	ordered := provision.RankPods(pods.Items)
@@ -705,7 +934,7 @@ func (c *Client) ClusterLogs(ctx context.Context, id core.ClusterId, pod *string
 	}
 
 	tailInt64 := int64(tail)
-	raw, err := c.clientset.CoreV1().Pods(c.namespace).GetLogs(target, &corev1.PodLogOptions{TailLines: &tailInt64, Timestamps: true}).DoRaw(ctx)
+	raw, err := c.clientset.CoreV1().Pods(ns).GetLogs(target, &corev1.PodLogOptions{TailLines: &tailInt64, Timestamps: true}).DoRaw(ctx)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, wrapErr(err)
@@ -727,7 +956,8 @@ func (s *ServiceClient) Deploy(ctx context.Context, name string, spec *core.Serv
 	// Same posture rule as clusters and jobs: KubeRay's serve-status polls
 	// reach the head only through the tenant-allow policy, so a namespace
 	// whose first workload is a RayService must get it here.
-	if err := s.EnsureNamespacePosture(ctx); err != nil {
+	ns := s.nsFor(spec.NamespaceResolved)
+	if err := s.ensurePostureIn(ctx, ns); err != nil {
 		return err
 	}
 	// Service pods carry the same cluster-id label (RayServiceFor's pod
@@ -736,13 +966,13 @@ func (s *ServiceClient) Deploy(ctx context.Context, name string, spec *core.Serv
 	// new generated RayClusters coexist but share it. Services carry no
 	// per-owner Ray-client pin: they are addressed through the Serve
 	// gateway, not a user's ray.init.
-	if err := s.ensureClusterAllow(ctx, name, nil); err != nil {
+	if err := s.ensureClusterAllow(ctx, ns, name, nil); err != nil {
 		return err
 	}
-	if err := s.ensureStorageSourcesExist(ctx, spec.StorageResolved); err != nil {
+	if err := s.ensureStorageSourcesExist(ctx, ns, spec.StorageResolved); err != nil {
 		return err
 	}
-	if err := s.ensureServiceAccountExists(ctx, spec.ServiceAccountResolved); err != nil {
+	if err := s.ensureServiceAccountExists(ctx, ns, spec.ServiceAccountResolved); err != nil {
 		return err
 	}
 	// queue is the project's serving LocalQueue (requirement 4), resolved
@@ -751,14 +981,18 @@ func (s *ServiceClient) Deploy(ctx context.Context, name string, spec *core.Serv
 	if err != nil {
 		return provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: err.Error()}
 	}
-	manifest.Namespace = s.namespace
-	return wrapErr(applySSA(ctx, s.c, manifest, client.FieldOwner(provision.FieldManager), client.ForceOwnership))
+	manifest.Namespace = ns
+	if err := applySSA(ctx, s.c, manifest, client.FieldOwner(provision.FieldManager), client.ForceOwnership); err != nil {
+		return wrapErr(err)
+	}
+	s.remember(name, ns)
+	return nil
 }
 
 // Get reads a RayService's status. Ported from kuberay_client.rs:666-684.
 func (s *ServiceClient) Get(ctx context.Context, name string) (*provision.ObservedService, error) {
 	var rs rayv1.RayService
-	if err := s.c.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: name}, &rs); err != nil {
+	if err := s.getManaged(ctx, name, &rs, &rayv1.RayServiceList{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil //nolint:nilnil // not-found is (nil, nil), matching kuberay_client.rs's Option-returning `get`
 		}
@@ -772,7 +1006,7 @@ func (s *ServiceClient) Get(ctx context.Context, name string) (*provision.Observ
 // [provision.ProjectLabel] and the applied generation from
 // [provision.GenerationAnnotation] (nil when either is absent).
 func (s *ServiceClient) observedService(rs *rayv1.RayService) *provision.ObservedService {
-	url := serviceURL(s.namespace, rs.Name)
+	url := serviceURL(rs.Namespace, rs.Name)
 	return &provision.ObservedService{
 		Name:       rs.Name,
 		State:      provision.ServiceStatusToState(rs.Status),
@@ -785,22 +1019,28 @@ func (s *ServiceClient) observedService(rs *rayv1.RayService) *provision.Observe
 // Delete deletes the RayService and its per-cluster allow policy.
 // Idempotent. Ported from kuberay_client.rs:686-696.
 func (s *ServiceClient) Delete(ctx context.Context, name string) error {
-	rs := &rayv1.RayService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.namespace}}
+	ns, err := s.locateOrDefault(ctx, name, &rayv1.RayServiceList{})
+	if err != nil {
+		return wrapErr(err)
+	}
+	rs := &rayv1.RayService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 	if err := s.c.Delete(ctx, rs); err != nil && !apierrors.IsNotFound(err) {
 		return wrapErr(err)
 	}
-	return s.deleteClusterAllow(ctx, name)
+	s.forget(name)
+	return s.deleteClusterAllow(ctx, ns, name)
 }
 
 // List returns every RayService this field manager owns in the namespace.
 // Ported from kuberay_client.rs:698-723.
 func (s *ServiceClient) List(ctx context.Context) ([]provision.ObservedService, error) {
 	var list rayv1.RayServiceList
-	if err := s.c.List(ctx, &list, client.InNamespace(s.namespace), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
+	if err := s.c.List(ctx, &list, s.listScope(), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
 		return nil, wrapErr(err)
 	}
 	out := make([]provision.ObservedService, 0, len(list.Items))
 	for i := range list.Items {
+		s.remember(list.Items[i].Name, list.Items[i].Namespace)
 		out = append(out, *s.observedService(&list.Items[i]))
 	}
 	return out, nil

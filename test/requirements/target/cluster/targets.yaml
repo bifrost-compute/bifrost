@@ -14,6 +14,9 @@
 #             the control plane runs with --ray-autoscaling, so a cluster's
 #             worker count is the KubeRay autoscaler's to change (ADR-0007)
 #             and r06's autoscale test can watch it act
+#   tenant-namespaces
+#             the control plane runs with --tenant-namespaces and cluster-wide
+#             RBAC, so r21 may create a tenant namespace and map a project to it
 #   store-loss
 #             tests may destroy the control plane's store behind its back
 #             (scale-to-zero + delete/re-create the data PVC) and watch it
@@ -22,14 +25,14 @@ kind:
   namespace: bifrost
   probeNamespace: jupyter
   contexts: ["^kind-"]
-  capabilities: [calico, probes, restart, gateway, store-loss]
+  capabilities: [calico, probes, restart, gateway, store-loss, tenant-namespaces]
 # The same kind cluster, control plane started with --ray-autoscaling (the
 # l3-kind "autoscaling" shard patches the Deployment before the suite runs).
 kind-autoscaling:
   namespace: bifrost
   probeNamespace: jupyter
   contexts: ["^kind-"]
-  capabilities: [calico, probes, restart, gateway, autoscaling, store-loss]
+  capabilities: [calico, probes, restart, gateway, autoscaling, store-loss, tenant-namespaces]
 grace:
   namespace: bifrost
   probeNamespace: jupyter
@@ -38,4 +41,6 @@ grace:
   # there is no wildcard HTTPRoute yet, so the lane must reach the API through
   # the in-cluster Service (BIFROST_URL=http://<clusterIP>:8484), which honours
   # the Host header — scripts/l3-grace.sh does exactly that.
-  capabilities: [calico, probes, restart, consumers, gateway]
+  # tenant-namespaces: grace runs --tenant-namespaces with the chart's
+  # tenancy.enabled ClusterRole (2026-09-17).
+  capabilities: [calico, probes, restart, consumers, gateway, tenant-namespaces]

@@ -127,6 +127,10 @@ func New(t testing.TB, opts ...Option) req.Target {
 		MeteringInterval:    100 * time.Millisecond,
 		GatewayDomain:       DefaultGatewayDomain,
 		GatewayExternalBase: DefaultGatewayExternalBase,
+		// Tenant namespaces (#21) are on: the fake provisioner has no
+		// namespaces, but admission's resolve-and-pin path is what L2
+		// proves, through ResolvedNamespace.
+		TenantNamespaces: true,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -188,7 +192,17 @@ func (tg *target) Has(capability string) bool {
 	// "gateway": a --gateway-domain is configured, so registration and
 	// authorization can be asserted (routing cannot — nothing resolves
 	// the .invalid domain). Every other L3 capability is absent.
-	return capability == "gateway" && tg.gatewayDomain != ""
+	// "tenant-namespaces": the in-process control plane runs with
+	// TenantNamespaces on (see New), so the policy's namespaces section is
+	// accepted and r21's admission-side tests run here; only the
+	// Kubernetes-side placement tests skip (NeedK8s).
+	switch capability {
+	case "gateway":
+		return tg.gatewayDomain != ""
+	case "tenant-namespaces":
+		return true
+	}
+	return false
 }
 
 // DestroyStore is never meaningful on inproc: its store is in-process
@@ -328,6 +342,36 @@ func (tg *target) ResolvedServiceAccount(kind, id string) (string, bool) {
 		return "", false
 	}
 	return *sa, true
+}
+
+// ResolvedNamespace returns the tenant namespace (#21) the named cluster,
+// job or service was admitted into, and whether one was pinned at all
+// (false = the control plane's default namespace). Same seam and reasons
+// as ResolvedServiceAccount.
+func (tg *target) ResolvedNamespace(kind, id string) (string, bool) {
+	ctx := context.Background()
+	var ns string
+	switch kind {
+	case "cluster":
+		c, err := tg.store.Get(ctx, core.ClusterId(id))
+		if err != nil || c == nil {
+			return "", false
+		}
+		ns = c.Spec.NamespaceResolved
+	case "job":
+		j, err := tg.store.GetRayJob(ctx, core.ClusterId(id))
+		if err != nil || j == nil {
+			return "", false
+		}
+		ns = j.Spec.NamespaceResolved
+	case "service":
+		svc, err := tg.store.GetService(ctx, id)
+		if err != nil || svc == nil {
+			return "", false
+		}
+		ns = svc.Spec.NamespaceResolved
+	}
+	return ns, ns != ""
 }
 
 // Cleanup deletes every cluster and service whose name carries the run

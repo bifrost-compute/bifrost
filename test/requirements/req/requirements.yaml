@@ -1,6 +1,7 @@
 # The Ray Software Pack requirement table (docs/SPEC.md): rows 1-18, plus
 # row 19 (governed environments, epic 2026-09-12-governed-environments) and
-# row 20 (workload identity, spec 2026-09-17-workload-identity-design).
+# row 20 (workload identity) and row 21 (tenant namespaces), both from
+# spec 2026-09-17-workload-identity-design.
 # req.Covers validates against this; reqreport renders from it. One source.
 - {n: 1,  priority: CRITICAL, title: "Deploy models from within Jupyter"}
 - {n: 2,  priority: HIGH,     title: "Groups share models privately"}
@@ -22,3 +23,4 @@
 - {n: 18, priority: LOW,      title: "NIST security baseline operation + audit evidence"}
 - {n: 19, priority: HIGH,     title: "Jobs run with governed, named environments (packages install at start, bounded, cached)"}
 - {n: 20, priority: HIGH,     title: "Workloads run under a per-project Kubernetes identity (cloud IAM binding, no static credentials)"}
+- {n: 21, priority: HIGH,     title: "Each project's workloads run in their own Kubernetes namespace (hard tenant boundary)"}

@@ -63,6 +63,10 @@ type Config struct {
 	// validation (#53), restoring the pre-#53 verbatim passthrough. Set
 	// only via the --allow-ungoverned-runtime-env DANGER flag.
 	RuntimeEnvUngoverned bool
+	// TenantNamespaces enables the policy's project -> namespace map (#21,
+	// `serve --tenant-namespaces`); the live provisioner must be built with
+	// live.WithTenantNamespaces() to match.
+	TenantNamespaces bool
 }
 
 // App is a wired control plane that has not yet opened a socket.
@@ -84,18 +88,19 @@ func New(cfg Config) (*App, error) {
 		cfg.ServicesPerProject = 1
 	}
 	server := &api.Server{
-		Store:               cfg.Store,
-		Registry:            cfg.Registry,
-		Validator:           cfg.Validator,
-		Local:               cfg.Local,
-		Provisioner:         cfg.Provisioner,
-		ServiceProvisioner:  cfg.ServiceProvisioner,
-		JobProvisioner:      cfg.JobProvisioner,
-		PolicySeed:          api.PolicyConfig{Admission: cfg.Admission.SeedRules(), Profiles: cfg.Profiles},
-		GatewayDomain:       cfg.GatewayDomain,
-		GatewayExternalBase: cfg.GatewayExternalBase,
-		ServicesPerProject:  cfg.ServicesPerProject,
+		Store:                cfg.Store,
+		Registry:             cfg.Registry,
+		Validator:            cfg.Validator,
+		Local:                cfg.Local,
+		Provisioner:          cfg.Provisioner,
+		ServiceProvisioner:   cfg.ServiceProvisioner,
+		JobProvisioner:       cfg.JobProvisioner,
+		PolicySeed:           api.PolicyConfig{Admission: cfg.Admission.SeedRules(), Profiles: cfg.Profiles},
+		GatewayDomain:        cfg.GatewayDomain,
+		GatewayExternalBase:  cfg.GatewayExternalBase,
+		ServicesPerProject:   cfg.ServicesPerProject,
 		RuntimeEnvUngoverned: cfg.RuntimeEnvUngoverned,
+		TenantNamespaces:     cfg.TenantNamespaces,
 	}
 	handler := api.NewHandler(server, api.HandlerOptions{
 		Validator:            cfg.Validator,

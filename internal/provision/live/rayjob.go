@@ -41,36 +41,41 @@ func (j *JobClient) ApplyJob(ctx context.Context, id core.ClusterId, spec *core.
 	// which selects the head and admits nobody else — the operator's job
 	// status checks then time out and KubeRay marks the job Failed
 	// (kind runs 33802820554…33825288414). Fail-closed like clusters.
-	if err := j.EnsureNamespacePosture(ctx); err != nil {
+	ns := j.nsFor(spec.NamespaceResolved)
+	if err := j.ensurePostureIn(ctx, ns); err != nil {
 		return err
 	}
-	if err := j.ensureClusterAllow(ctx, string(id), spec.Owner); err != nil {
+	if err := j.ensureClusterAllow(ctx, ns, string(id), spec.Owner); err != nil {
 		return err
 	}
 	// Package installs under default-deny egress (issue #56): a job whose
 	// admitted runtime env installs packages gets the package-proxy
 	// allowance for its cluster's pods; every other job gets none.
-	if err := j.ensurePackageProxyEgress(ctx, string(id), spec.RuntimeEnvYaml); err != nil {
+	if err := j.ensurePackageProxyEgress(ctx, ns, string(id), spec.RuntimeEnvYaml); err != nil {
 		return err
 	}
 	// Workload identity (#20): a missing ServiceAccount is a readable
 	// condition here, not a submitter and a head stuck in ContainerCreating.
-	if err := j.ensureServiceAccountExists(ctx, spec.ServiceAccountResolved); err != nil {
+	if err := j.ensureServiceAccountExists(ctx, ns, spec.ServiceAccountResolved); err != nil {
 		return err
 	}
 	manifest, err := provision.RayJobForScheduled(id, spec, generation, queue, j.scheduling)
 	if err != nil {
 		return provision.ProvisionError{Kind: provision.ProvisionErrBackend, Message: err.Error()}
 	}
-	manifest.Namespace = j.namespace
-	return wrapErr(applySSA(ctx, j.c, manifest, client.FieldOwner(provision.FieldManager), client.ForceOwnership))
+	manifest.Namespace = ns
+	if err := applySSA(ctx, j.c, manifest, client.FieldOwner(provision.FieldManager), client.ForceOwnership); err != nil {
+		return wrapErr(err)
+	}
+	j.remember(string(id), ns)
+	return nil
 }
 
 // ObserveJob reads a RayJob's status. A missing RayJob is
 // [provision.ProvisionErrNotFound].
 func (j *JobClient) ObserveJob(ctx context.Context, id core.ClusterId) (provision.ObservedJob, error) {
 	var rj rayv1.RayJob
-	if err := j.c.Get(ctx, client.ObjectKey{Namespace: j.namespace, Name: string(id)}, &rj); err != nil {
+	if err := j.getManaged(ctx, string(id), &rj, &rayv1.RayJobList{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			return provision.ObservedJob{}, provision.ProvisionError{Kind: provision.ProvisionErrNotFound, ClusterID: id}
 		}
@@ -83,21 +88,27 @@ func (j *JobClient) ObserveJob(ctx context.Context, id core.ClusterId) (provisio
 // and reaps the per-cluster allow policy. Idempotent: already-gone is
 // success.
 func (j *JobClient) DeleteJob(ctx context.Context, id core.ClusterId) error {
-	rj := &rayv1.RayJob{ObjectMeta: metav1.ObjectMeta{Name: string(id), Namespace: j.namespace}}
+	ns, err := j.locateOrDefault(ctx, string(id), &rayv1.RayJobList{})
+	if err != nil {
+		return wrapErr(err)
+	}
+	rj := &rayv1.RayJob{ObjectMeta: metav1.ObjectMeta{Name: string(id), Namespace: ns}}
 	if err := j.c.Delete(ctx, rj); err != nil && !apierrors.IsNotFound(err) {
 		return wrapErr(err)
 	}
-	return j.deleteClusterAllow(ctx, string(id))
+	j.forget(string(id))
+	return j.deleteClusterAllow(ctx, ns, string(id))
 }
 
 // ListJobs returns every RayJob this field manager owns in the namespace.
 func (j *JobClient) ListJobs(ctx context.Context) ([]provision.ObservedJob, error) {
 	var list rayv1.RayJobList
-	if err := j.c.List(ctx, &list, client.InNamespace(j.namespace), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
+	if err := j.c.List(ctx, &list, j.listScope(), client.MatchingLabels{provision.ManagedByLabel: provision.FieldManager}); err != nil {
 		return nil, wrapErr(err)
 	}
 	out := make([]provision.ObservedJob, 0, len(list.Items))
 	for i := range list.Items {
+		j.remember(list.Items[i].Name, list.Items[i].Namespace)
 		out = append(out, provision.ObservedJobFromRayJob(&list.Items[i]))
 	}
 	return out, nil
