@@ -66,7 +66,7 @@ var _ Store = (*SqliteStore)(nil)
 //     writer (the Rust reference relies on sqlx's own pool semantics for
 //     this; WAL is the direct SQLite equivalent).
 func sqliteDSN(path string) string {
-	return fmt.Sprintf("file:%s?_txlock=immediate&_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on", path)
+	return fmt.Sprintf("file:%s?_txlock=immediate&_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on&_pragma=temp_store(2)", path)
 }
 
 // NewSqliteStore opens (creating if absent) a SQLite-backed Store at path
