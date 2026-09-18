@@ -926,6 +926,46 @@ type ImagePlatform struct {
 	Variant      *string `json:"variant,omitempty"`
 }
 
+// ImageSource A registry repository administrators may browse for catalog candidates (#10, image sources): the console lists its tags live, so images pushed by a build pipeline or Artifact Keeper appear as a pick-list without anyone typing a reference. A source is a pointer, never an approval: a tag becomes runnable only once it is added to the image catalog (`ImageEntry`). The control plane reaches the registry as `serve --image-registries` describes it (in-cluster address, credentials); an undescribed host is read anonymously.
+type ImageSource struct {
+	// Description Human-readable summary.
+	Description *string `json:"description,omitempty"`
+
+	// Name Source name (RFC 1123 label) clients show and pick.
+	Name string `json:"name"`
+
+	// Projects Projects whose administrators may browse this source; empty = every project.
+	Projects *[]string `json:"projects,omitempty"`
+
+	// Registry Registry host[:port] as image references name it — what the nodes pull from (`localhost:32000`, an Artifact Keeper Service, `ghcr.io`).
+	Registry string `json:"registry"`
+
+	// Repository The one repository to list (`ray/team`); empty = every repository the registry's catalog lists (`/v2/_catalog`; Docker Hub has none).
+	Repository *string `json:"repository,omitempty"`
+}
+
+// ImageSourceRepository One repository of an image source with its tags, newest last by tag sort, and the full references a catalog entry would carry.
+type ImageSourceRepository struct {
+	// Refs `registry/repository:tag` for each tag, ready to become an `ImageEntry.ref`.
+	Refs []string `json:"refs"`
+
+	// Repository Repository name as the registry lists it.
+	Repository string `json:"repository"`
+
+	// Tags Tags the registry lists, sorted.
+	Tags []string `json:"tags"`
+}
+
+// ImageSourceTags What an image source currently offers: its repositories and their tags, read live from the registry (cached briefly).
+type ImageSourceTags struct {
+	// Name The source's name.
+	Name string `json:"name"`
+
+	// Registry The source's registry host.
+	Registry     string                  `json:"registry"`
+	Repositories []ImageSourceRepository `json:"repositories"`
+}
+
 // JobView A job in the persistent, cross-cluster history (Phase 3, spec §5.5).
 type JobView struct {
 	Cluster string `json:"cluster"`
@@ -1050,6 +1090,9 @@ type PolicyView struct {
 
 	// Environments The environment catalog (#52); empty when none are configured.
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// ImageSources Registry repositories the console may browse for catalog candidates (#10); empty when none are configured.
+	ImageSources *[]ImageSource `json:"image_sources,omitempty"`
 
 	// Images The image catalog (#7/#10); empty when none are configured.
 	Images *[]ImageEntry `json:"images,omitempty"`
@@ -1475,6 +1518,9 @@ type UpdatePolicy struct {
 
 	// Environments Present replaces the whole environment catalog (`[]` clears it) (#52).
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// ImageSources Present replaces the whole image-source list (`[]` clears it) (#10). Validated as a unit: unique RFC 1123 names, a registry host, an optional repository path, per-source `projects`.
+	ImageSources *[]ImageSource `json:"image_sources,omitempty"`
 
 	// Images Present replaces the whole image catalog (`[]` clears it) (#7/#10).
 	Images *[]ImageEntry `json:"images,omitempty"`
@@ -2063,6 +2109,12 @@ type ClientInterface interface {
 
 	// ListImages performs a GET /api/v1/images (the `ListImages` operationId) request.
 	ListImages(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListImageSources performs a GET /api/v1/images/sources (the `ListImageSources` operationId) request.
+	ListImageSources(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListImageSourceTags performs a GET /api/v1/images/sources/{name}/tags (the `ListImageSourceTags` operationId) request.
+	ListImageSourceTags(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// InspectImage performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
 	InspectImage(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2715,6 +2767,32 @@ func (c *Client) Identity(ctx context.Context, reqEditors ...RequestEditorFn) (*
 // ListImages performs a GET /api/v1/images (the `ListImages` operationId) request.
 func (c *Client) ListImages(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListImagesRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListImageSources performs a GET /api/v1/images/sources (the `ListImageSources` operationId) request.
+func (c *Client) ListImageSources(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListImageSourcesRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ListImageSourceTags performs a GET /api/v1/images/sources/{name}/tags (the `ListImageSourceTags` operationId) request.
+func (c *Client) ListImageSourceTags(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListImageSourceTagsRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -4392,6 +4470,67 @@ func NewListImagesRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewListImageSourcesRequest constructs an http.Request for the ListImageSources method
+func NewListImageSourcesRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/images/sources")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListImageSourceTagsRequest constructs an http.Request for the ListImageSourceTags method
+func NewListImageSourceTagsRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "name", name, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/images/sources/%s/tags", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewInspectImageRequest constructs an http.Request for the InspectImage method
 func NewInspectImageRequest(server string, name string) (*http.Request, error) {
 	var err error
@@ -5606,6 +5745,16 @@ type ClientWithResponsesInterface interface {
 	//
 	// Returns a wrapper object for the known response body format(s).
 	ListImagesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListImagesHTTPResponse, error)
+
+	// ListImageSourcesWithResponse performs a GET /api/v1/images/sources (the `ListImageSources` operationId) request.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	ListImageSourcesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListImageSourcesHTTPResponse, error)
+
+	// ListImageSourceTagsWithResponse performs a GET /api/v1/images/sources/{name}/tags (the `ListImageSourceTags` operationId) request.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	ListImageSourceTagsWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*ListImageSourceTagsHTTPResponse, error)
 
 	// InspectImageWithResponse performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
 	//
@@ -6910,6 +7059,88 @@ func (r ListImagesHTTPResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ListImagesHTTPResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListImageSourcesHTTPResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *[]ImageSource
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListImageSourcesHTTPResponse) GetJSON200() *[]ImageSource {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r ListImageSourcesHTTPResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListImageSourcesHTTPResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListImageSourcesHTTPResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListImageSourcesHTTPResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListImageSourceTagsHTTPResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *ImageSourceTags
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r ListImageSourceTagsHTTPResponse) GetJSON200() *ImageSourceTags {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r ListImageSourceTagsHTTPResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ListImageSourceTagsHTTPResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListImageSourceTagsHTTPResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListImageSourceTagsHTTPResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -8326,6 +8557,28 @@ func (c *ClientWithResponses) ListImagesWithResponse(ctx context.Context, reqEdi
 	return ParseListImagesHTTPResponse(rsp)
 }
 
+// ListImageSourcesWithResponse performs a GET /api/v1/images/sources (the `ListImageSources` operationId) request.
+//
+// Returns a wrapper object for the known response body format(s).
+func (c *ClientWithResponses) ListImageSourcesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListImageSourcesHTTPResponse, error) {
+	rsp, err := c.ListImageSources(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListImageSourcesHTTPResponse(rsp)
+}
+
+// ListImageSourceTagsWithResponse performs a GET /api/v1/images/sources/{name}/tags (the `ListImageSourceTags` operationId) request.
+//
+// Returns a wrapper object for the known response body format(s).
+func (c *ClientWithResponses) ListImageSourceTagsWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*ListImageSourceTagsHTTPResponse, error) {
+	rsp, err := c.ListImageSourceTags(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListImageSourceTagsHTTPResponse(rsp)
+}
+
 // InspectImageWithResponse performs a GET /api/v1/images/{name}/inspect (the `InspectImage` operationId) request.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -9525,6 +9778,76 @@ func ParseListImagesHTTPResponse(rsp *http.Response) (*ListImagesHTTPResponse, e
 		break // No content-type
 
 	case rsp.StatusCode == 403:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseListImageSourcesHTTPResponse parses an HTTP response from a ListImageSourcesWithResponse call
+func ParseListImageSourcesHTTPResponse(rsp *http.Response) (*ListImageSourcesHTTPResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListImageSourcesHTTPResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []ImageSource
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 403:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseListImageSourceTagsHTTPResponse parses an HTTP response from a ListImageSourceTagsWithResponse call
+func ParseListImageSourceTagsHTTPResponse(rsp *http.Response) (*ListImageSourceTagsHTTPResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListImageSourceTagsHTTPResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ImageSourceTags
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 403:
+		break // No content-type
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	case rsp.StatusCode == 502:
 		break // No content-type
 
 	}

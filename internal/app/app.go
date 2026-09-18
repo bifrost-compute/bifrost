@@ -19,6 +19,7 @@ import (
 	"github.com/bifrost-compute/bifrost/internal/controller"
 	"github.com/bifrost-compute/bifrost/internal/core"
 	"github.com/bifrost-compute/bifrost/internal/provision"
+	"github.com/bifrost-compute/bifrost/internal/registry"
 )
 
 // Config is everything New needs. Store is required; the rest is optional
@@ -67,6 +68,11 @@ type Config struct {
 	// `serve --tenant-namespaces`); the live provisioner must be built with
 	// live.WithTenantNamespaces() to match.
 	TenantNamespaces bool
+	// Images is the registry client inspect_image and the image sources
+	// (#10) read registries through; nil = anonymous over https (http for
+	// loopback). `serve --image-registries` builds one with the
+	// deployment's host addresses and credentials.
+	Images *registry.Client
 }
 
 // App is a wired control plane that has not yet opened a socket.
@@ -101,6 +107,7 @@ func New(cfg Config) (*App, error) {
 		ServicesPerProject:   cfg.ServicesPerProject,
 		RuntimeEnvUngoverned: cfg.RuntimeEnvUngoverned,
 		TenantNamespaces:     cfg.TenantNamespaces,
+		Images:               cfg.Images,
 	}
 	handler := api.NewHandler(server, api.HandlerOptions{
 		Validator:            cfg.Validator,

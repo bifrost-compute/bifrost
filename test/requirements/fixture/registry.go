@@ -30,6 +30,14 @@ func FakeRegistry(t req.T) (ref string) {
 		_, _ = w.Write(man)
 	})
 	mux.HandleFunc("/v2/ray/team/blobs/"+digestOf(cfg), func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(cfg) })
+	// Image sources (#10): the catalog and the repository's tags, so a
+	// requirement test can browse this registry as a source.
+	mux.HandleFunc("/v2/_catalog", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"repositories":["ray/team"]}`))
+	})
+	mux.HandleFunc("/v2/ray/team/tags/list", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"ray/team","tags":["1","2-py312"]}`))
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://") + "/ray/team:1"

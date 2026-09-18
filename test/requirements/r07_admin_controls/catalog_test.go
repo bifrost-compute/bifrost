@@ -141,3 +141,90 @@ func TestInspectImageDescribesACatalogEntryWithoutPulling(t *testing.T) {
 		t.Errorf("inspect as dev-b = %v %v, want 404", err, r2.StatusCode())
 	}
 }
+
+// Image sources (#10): an administrator points the console at a registry
+// repository and its tags are listed live as catalog candidates. On
+// inproc the source is the fixture registry; a cluster target names a
+// reachable source through REQ_IMAGE_SOURCE as `host[/repository]`.
+func TestImageSourcesListARegistryRepositoryLive(t *testing.T) {
+	tgt := target.Get(t)
+	req.Covers(t, 10, "an image source names a registry repository; list_image_source_tags reads its tags from the registry as full references a catalog entry can take, narrowed to the projects the source is open to; the section is validated as a unit")
+	ctx := context.Background()
+	host, repo := "", ""
+	if tgt.Name() == "inproc" {
+		ref := fixture.FakeRegistry(t) // host:port/ray/team:1
+		host = ref[:len(ref)-len("/ray/team:1")]
+		repo = "ray/team"
+	} else if src := os.Getenv("REQ_IMAGE_SOURCE"); src != "" {
+		host, repo = src, ""
+		if i := len(src); i > 0 {
+			if slash := indexOf(src, '/'); slash > 0 {
+				host, repo = src[:slash], src[slash+1:]
+			}
+		}
+	} else {
+		reason := "target " + tgt.Name() + " declares no REQ_IMAGE_SOURCE the control plane can reach"
+		t.Log(req.Line{Kind: "skip", Req: 0, Reason: reason}.Format())
+		t.Skip(reason)
+	}
+	name := req.Name("src")
+	setPolicySections(t, tgt, fmt.Sprintf(`{"image_sources":[{"name":%q,"registry":%q,"repository":%q,"projects":["team-a"]}]}`, name, host, repo))
+
+	// Validation: a URL is not a registry host; a mixed-case repository is refused.
+	admin := tgt.As("admin").API()
+	badRepo := "Ray/Team"
+	for what, bad := range map[string][]client.ImageSource{
+		"url registry":   {{Name: "x", Registry: "https://" + host}},
+		"bad repository": {{Name: "x", Registry: host, Repository: &badRepo}},
+	} {
+		r, err := admin.UpdatePolicyWithResponse(ctx, client.UpdatePolicyJSONRequestBody{ImageSources: &bad})
+		if err != nil || r.StatusCode() != http.StatusBadRequest {
+			t.Errorf("%s: PUT = %v %v, want 400", what, err, r.StatusCode())
+		}
+	}
+
+	// team-a browses it; team-b never learns it exists.
+	tags, err := tgt.As("dev-a").API().ListImageSourceTagsWithResponse(ctx, name)
+	if err != nil || tags.JSON200 == nil {
+		t.Fatalf("list_image_source_tags: err=%v status=%v body=%s", err, tags.StatusCode(), tags.Body)
+	}
+	if tags.JSON200.Registry != host || len(tags.JSON200.Repositories) == 0 {
+		t.Fatalf("tags = %+v", tags.JSON200)
+	}
+	found := false
+	for _, r := range tags.JSON200.Repositories {
+		if len(r.Tags) == 0 || len(r.Refs) != len(r.Tags) {
+			t.Errorf("repository %s: tags=%v refs=%v", r.Repository, r.Tags, r.Refs)
+		}
+		for i, ref := range r.Refs {
+			if ref != host+"/"+r.Repository+":"+r.Tags[i] {
+				t.Errorf("ref %q does not name host/repository:tag", ref)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no refs listed")
+	}
+	if other, err := tgt.As("dev-b").API().ListImageSourceTagsWithResponse(ctx, name); err != nil || other.StatusCode() != http.StatusNotFound {
+		t.Errorf("dev-b list_image_source_tags = %v %v, want 404", err, other.StatusCode())
+	}
+	list, err := tgt.As("dev-b").API().ListImageSourcesWithResponse(ctx)
+	if err != nil || list.JSON200 == nil {
+		t.Fatalf("list_image_sources: %v %v", err, list.StatusCode())
+	}
+	for _, s := range *list.JSON200 {
+		if s.Name == name {
+			t.Errorf("dev-b sees team-a's source %s", name)
+		}
+	}
+}
+
+func indexOf(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}

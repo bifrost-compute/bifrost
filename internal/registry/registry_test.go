@@ -51,6 +51,7 @@ type fakeRegistry struct {
 	manifests   map[string][]byte // by tag and by digest
 	mediaTypes  map[string]string
 	tokenHits   int
+	tagHits     int
 }
 
 func newFakeRegistry(requireAuth bool) *fakeRegistry {
@@ -115,6 +116,17 @@ func (f *fakeRegistry) handler() http.Handler {
 		}
 		_, _ = w.Write([]byte(`{"token":"tok123"}`))
 	})
+	// Registry-level listing (#10 image sources): the catalog and a
+	// repository's tags, the second paginated so the Link follow is
+	// exercised. Both sit behind the same challenge as the manifests.
+	mux.HandleFunc("/v2/_catalog", func(w http.ResponseWriter, r *http.Request) {
+		if f.requireAuth && r.Header.Get("Authorization") != "Bearer tok123" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="http://`+r.Host+`/v2/token",service="fake",scope="registry:catalog:*"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"repositories":["ray/team","ray/base","other"]}`))
+	})
 	mux.HandleFunc("/v2/ray/team/", func(w http.ResponseWriter, r *http.Request) {
 		if f.requireAuth && r.Header.Get("Authorization") != "Bearer tok123" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="http://`+r.Host+`/v2/token",service="fake"`)
@@ -123,6 +135,16 @@ func (f *fakeRegistry) handler() http.Handler {
 		}
 		rest := strings.TrimPrefix(r.URL.Path, "/v2/ray/team/")
 		kind, name, _ := strings.Cut(rest, "/")
+		if kind == "tags" && name == "list" {
+			f.tagHits++
+			if r.URL.Query().Get("last") == "" {
+				w.Header().Set("Link", `</v2/ray/team/tags/list?n=500&last=2.56.0>; rel="next"`)
+				_, _ = w.Write([]byte(`{"name":"ray/team","tags":["2.56.0","2.55.0"]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"name":"ray/team","tags":["2.57.0-py312"]}`))
+			return
+		}
 		switch kind {
 		case "manifests":
 			b, ok := f.manifests[name]

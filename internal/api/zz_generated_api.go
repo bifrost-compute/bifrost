@@ -926,6 +926,46 @@ type ImagePlatform struct {
 	Variant      *string `json:"variant,omitempty"`
 }
 
+// ImageSource A registry repository administrators may browse for catalog candidates (#10, image sources): the console lists its tags live, so images pushed by a build pipeline or Artifact Keeper appear as a pick-list without anyone typing a reference. A source is a pointer, never an approval: a tag becomes runnable only once it is added to the image catalog (`ImageEntry`). The control plane reaches the registry as `serve --image-registries` describes it (in-cluster address, credentials); an undescribed host is read anonymously.
+type ImageSource struct {
+	// Description Human-readable summary.
+	Description *string `json:"description,omitempty"`
+
+	// Name Source name (RFC 1123 label) clients show and pick.
+	Name string `json:"name"`
+
+	// Projects Projects whose administrators may browse this source; empty = every project.
+	Projects *[]string `json:"projects,omitempty"`
+
+	// Registry Registry host[:port] as image references name it — what the nodes pull from (`localhost:32000`, an Artifact Keeper Service, `ghcr.io`).
+	Registry string `json:"registry"`
+
+	// Repository The one repository to list (`ray/team`); empty = every repository the registry's catalog lists (`/v2/_catalog`; Docker Hub has none).
+	Repository *string `json:"repository,omitempty"`
+}
+
+// ImageSourceRepository One repository of an image source with its tags, newest last by tag sort, and the full references a catalog entry would carry.
+type ImageSourceRepository struct {
+	// Refs `registry/repository:tag` for each tag, ready to become an `ImageEntry.ref`.
+	Refs []string `json:"refs"`
+
+	// Repository Repository name as the registry lists it.
+	Repository string `json:"repository"`
+
+	// Tags Tags the registry lists, sorted.
+	Tags []string `json:"tags"`
+}
+
+// ImageSourceTags What an image source currently offers: its repositories and their tags, read live from the registry (cached briefly).
+type ImageSourceTags struct {
+	// Name The source's name.
+	Name string `json:"name"`
+
+	// Registry The source's registry host.
+	Registry     string                  `json:"registry"`
+	Repositories []ImageSourceRepository `json:"repositories"`
+}
+
 // JobView A job in the persistent, cross-cluster history (Phase 3, spec §5.5).
 type JobView struct {
 	Cluster string `json:"cluster"`
@@ -1050,6 +1090,9 @@ type PolicyView struct {
 
 	// Environments The environment catalog (#52); empty when none are configured.
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// ImageSources Registry repositories the console may browse for catalog candidates (#10); empty when none are configured.
+	ImageSources *[]ImageSource `json:"image_sources,omitempty"`
 
 	// Images The image catalog (#7/#10); empty when none are configured.
 	Images *[]ImageEntry `json:"images,omitempty"`
@@ -1475,6 +1518,9 @@ type UpdatePolicy struct {
 
 	// Environments Present replaces the whole environment catalog (`[]` clears it) (#52).
 	Environments *[]EnvironmentSpec `json:"environments,omitempty"`
+
+	// ImageSources Present replaces the whole image-source list (`[]` clears it) (#10). Validated as a unit: unique RFC 1123 names, a registry host, an optional repository path, per-source `projects`.
+	ImageSources *[]ImageSource `json:"image_sources,omitempty"`
 
 	// Images Present replaces the whole image catalog (`[]` clears it) (#7/#10).
 	Images *[]ImageEntry `json:"images,omitempty"`
@@ -1904,6 +1950,12 @@ type ServerInterface interface {
 
 	// (GET /api/v1/images)
 	ListImages(w http.ResponseWriter, r *http.Request)
+
+	// (GET /api/v1/images/sources)
+	ListImageSources(w http.ResponseWriter, r *http.Request)
+
+	// (GET /api/v1/images/sources/{name}/tags)
+	ListImageSourceTags(w http.ResponseWriter, r *http.Request, name string)
 
 	// (GET /api/v1/images/{name}/inspect)
 	InspectImage(w http.ResponseWriter, r *http.Request, name string)
@@ -2825,6 +2877,46 @@ func (siw *ServerInterfaceWrapper) ListImages(w http.ResponseWriter, r *http.Req
 	handler.ServeHTTP(w, r)
 }
 
+// ListImageSources operation middleware
+func (siw *ServerInterfaceWrapper) ListImageSources(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListImageSources(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListImageSourceTags operation middleware
+func (siw *ServerInterfaceWrapper) ListImageSourceTags(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListImageSourceTags(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // InspectImage operation middleware
 func (siw *ServerInterfaceWrapper) InspectImage(w http.ResponseWriter, r *http.Request) {
 
@@ -3561,6 +3653,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/environments", wrapper.ListEnvironments)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/identity", wrapper.Identity)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/images", wrapper.ListImages)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/images/sources", wrapper.ListImageSources)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/images/sources/{name}/tags", wrapper.ListImageSourceTags)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/images/{name}/inspect", wrapper.InspectImage)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/jobs", wrapper.ListJobs)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/jobs", wrapper.SubmitJob)
@@ -4845,6 +4939,97 @@ func (response ListImages403Response) VisitListImagesResponse(w http.ResponseWri
 	return nil
 }
 
+type ListImageSourcesRequestObject struct {
+}
+
+type ListImageSourcesResponseObject interface {
+	VisitListImageSourcesResponse(w http.ResponseWriter) error
+}
+
+type ListImageSources200JSONResponse []ImageSource
+
+func (response ListImageSources200JSONResponse) VisitListImageSourcesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListImageSources401Response struct {
+}
+
+func (response ListImageSources401Response) VisitListImageSourcesResponse(w http.ResponseWriter) error {
+	w.WriteHeader(401)
+	return nil
+}
+
+type ListImageSources403Response struct {
+}
+
+func (response ListImageSources403Response) VisitListImageSourcesResponse(w http.ResponseWriter) error {
+	w.WriteHeader(403)
+	return nil
+}
+
+type ListImageSourceTagsRequestObject struct {
+	Name string `json:"name"`
+}
+
+type ListImageSourceTagsResponseObject interface {
+	VisitListImageSourceTagsResponse(w http.ResponseWriter) error
+}
+
+type ListImageSourceTags200JSONResponse ImageSourceTags
+
+func (response ListImageSourceTags200JSONResponse) VisitListImageSourceTagsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListImageSourceTags401Response struct {
+}
+
+func (response ListImageSourceTags401Response) VisitListImageSourceTagsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(401)
+	return nil
+}
+
+type ListImageSourceTags403Response struct {
+}
+
+func (response ListImageSourceTags403Response) VisitListImageSourceTagsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(403)
+	return nil
+}
+
+type ListImageSourceTags404Response struct {
+}
+
+func (response ListImageSourceTags404Response) VisitListImageSourceTagsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(404)
+	return nil
+}
+
+type ListImageSourceTags502Response struct {
+}
+
+func (response ListImageSourceTags502Response) VisitListImageSourceTagsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(502)
+	return nil
+}
+
 type InspectImageRequestObject struct {
 	Name string `json:"name"`
 }
@@ -5983,6 +6168,12 @@ type StrictServerInterface interface {
 	// (GET /api/v1/images)
 	ListImages(ctx context.Context, request ListImagesRequestObject) (ListImagesResponseObject, error)
 
+	// (GET /api/v1/images/sources)
+	ListImageSources(ctx context.Context, request ListImageSourcesRequestObject) (ListImageSourcesResponseObject, error)
+
+	// (GET /api/v1/images/sources/{name}/tags)
+	ListImageSourceTags(ctx context.Context, request ListImageSourceTagsRequestObject) (ListImageSourceTagsResponseObject, error)
+
 	// (GET /api/v1/images/{name}/inspect)
 	InspectImage(ctx context.Context, request InspectImageRequestObject) (InspectImageResponseObject, error)
 
@@ -6867,6 +7058,56 @@ func (sh *strictHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListImagesResponseObject); ok {
 		if err := validResponse.VisitListImagesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListImageSources operation middleware
+func (sh *strictHandler) ListImageSources(w http.ResponseWriter, r *http.Request) {
+	var request ListImageSourcesRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListImageSources(ctx, request.(ListImageSourcesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListImageSources")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListImageSourcesResponseObject); ok {
+		if err := validResponse.VisitListImageSourcesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListImageSourceTags operation middleware
+func (sh *strictHandler) ListImageSourceTags(w http.ResponseWriter, r *http.Request, name string) {
+	var request ListImageSourceTagsRequestObject
+
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListImageSourceTags(ctx, request.(ListImageSourceTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListImageSourceTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListImageSourceTagsResponseObject); ok {
+		if err := validResponse.VisitListImageSourceTagsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

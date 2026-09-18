@@ -1479,6 +1479,96 @@
         ],
         "type": "object"
       },
+      "ImageSource": {
+        "description": "A registry repository administrators may browse for catalog candidates (#10, image sources): the console lists its tags live, so images pushed by a build pipeline or Artifact Keeper appear as a pick-list without anyone typing a reference. A source is a pointer, never an approval: a tag becomes runnable only once it is added to the image catalog (`ImageEntry`). The control plane reaches the registry as `serve --image-registries` describes it (in-cluster address, credentials); an undescribed host is read anonymously.",
+        "properties": {
+          "description": {
+            "description": "Human-readable summary.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Source name (RFC 1123 label) clients show and pick.",
+            "type": "string"
+          },
+          "projects": {
+            "description": "Projects whose administrators may browse this source; empty = every project.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "registry": {
+            "description": "Registry host[:port] as image references name it \u2014 what the nodes pull from (`localhost:32000`, an Artifact Keeper Service, `ghcr.io`).",
+            "type": "string"
+          },
+          "repository": {
+            "description": "The one repository to list (`ray/team`); empty = every repository the registry's catalog lists (`/v2/_catalog`; Docker Hub has none).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "registry"
+        ],
+        "type": "object"
+      },
+      "ImageSourceRepository": {
+        "description": "One repository of an image source with its tags, newest last by tag sort, and the full references a catalog entry would carry.",
+        "properties": {
+          "refs": {
+            "description": "`registry/repository:tag` for each tag, ready to become an `ImageEntry.ref`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "repository": {
+            "description": "Repository name as the registry lists it.",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Tags the registry lists, sorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "repository",
+          "tags",
+          "refs"
+        ],
+        "type": "object"
+      },
+      "ImageSourceTags": {
+        "description": "What an image source currently offers: its repositories and their tags, read live from the registry (cached briefly).",
+        "properties": {
+          "name": {
+            "description": "The source's name.",
+            "type": "string"
+          },
+          "registry": {
+            "description": "The source's registry host.",
+            "type": "string"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/ImageSourceRepository"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "registry",
+          "repositories"
+        ],
+        "type": "object"
+      },
       "JobView": {
         "description": "A job in the persistent, cross-cluster history (Phase 3, spec \u00a75.5).",
         "properties": {
@@ -1742,6 +1832,13 @@
             "description": "The environment catalog (#52); empty when none are configured.",
             "items": {
               "$ref": "#/components/schemas/EnvironmentSpec"
+            },
+            "type": "array"
+          },
+          "image_sources": {
+            "description": "Registry repositories the console may browse for catalog candidates (#10); empty when none are configured.",
+            "items": {
+              "$ref": "#/components/schemas/ImageSource"
             },
             "type": "array"
           },
@@ -2834,6 +2931,16 @@
             "description": "Present replaces the whole environment catalog (`[]` clears it) (#52).",
             "items": {
               "$ref": "#/components/schemas/EnvironmentSpec"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "image_sources": {
+            "description": "Present replaces the whole image-source list (`[]` clears it) (#10). Validated as a unit: unique RFC 1123 names, a registry host, an optional repository path, per-source `projects`.",
+            "items": {
+              "$ref": "#/components/schemas/ImageSource"
             },
             "type": [
               "array",
@@ -4576,6 +4683,88 @@
           },
           "403": {
             "description": "Missing Read on cluster"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "images"
+        ]
+      }
+    },
+    "/api/v1/images/sources": {
+      "get": {
+        "operationId": "list_image_sources",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ImageSource"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The image sources the caller's projects may browse"
+          },
+          "401": {
+            "description": "No/invalid token"
+          },
+          "403": {
+            "description": "Missing Read on cluster"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "tags": [
+          "images"
+        ]
+      }
+    },
+    "/api/v1/images/sources/{name}/tags": {
+      "get": {
+        "operationId": "list_image_source_tags",
+        "parameters": [
+          {
+            "description": "Image source name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageSourceTags"
+                }
+              }
+            },
+            "description": "The source's repositories and tags as its registry lists them now"
+          },
+          "401": {
+            "description": "No/invalid token"
+          },
+          "403": {
+            "description": "Missing Read on cluster"
+          },
+          "404": {
+            "description": "No such source, or not open to the caller's projects"
+          },
+          "502": {
+            "description": "The registry could not be reached or refused the listing"
           }
         },
         "security": [

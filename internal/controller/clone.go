@@ -321,7 +321,21 @@ func cloneStoredPolicy(p StoredPolicy) StoredPolicy {
 	p.Images = cloneImageEntries(p.Images)
 	p.WorkloadIdentity = cloneWorkloadIdentity(p.WorkloadIdentity)
 	p.Namespaces = cloneStringMap(p.Namespaces)
+	p.ImageSources = cloneImageSources(p.ImageSources)
 	return p
+}
+
+func cloneImageSources(in []core.ImageSource) []core.ImageSource {
+	if in == nil {
+		return nil
+	}
+	out := make([]core.ImageSource, len(in))
+	for i, e := range in {
+		e.Description = clonePtr(e.Description)
+		e.Projects = cloneStringSlice(e.Projects)
+		out[i] = e
+	}
+	return out
 }
 
 // cloneWorkloadIdentity copies the workload-identity map (#20); its

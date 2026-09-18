@@ -553,6 +553,9 @@ type StoredPolicy struct {
 	// live in (#21, tenant namespaces). Unmapped projects use the control
 	// plane's default workload namespace. Empty = single-namespace.
 	Namespaces map[string]string `json:"namespaces,omitempty"`
+	// ImageSources are the registry repositories the console may browse
+	// for catalog candidates (#10). Empty = none.
+	ImageSources []core.ImageSource `json:"image_sources,omitempty"`
 }
 
 // storedPolicyAlias breaks the recursion MarshalJSON would otherwise cause

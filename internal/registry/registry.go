@@ -210,8 +210,16 @@ type Client struct {
 	// HTTP is the transport; nil = a 30 s-timeout default.
 	HTTP *http.Client
 	// Credentials returns basic credentials for a registry host, when the
-	// deployment has any; nil or ok=false = anonymous.
+	// deployment has any; nil or ok=false = anonymous. Hosts, when set,
+	// is consulted first (see HostConfig).
 	Credentials func(host string) (user, pass string, ok bool)
+	// Hosts returns the deployment's configuration for a registry host
+	// as image references name it: where its /v2 API actually answers
+	// (an in-cluster Service for a registry the nodes reach at
+	// `localhost:32000`, a plain-HTTP address) and the credentials to
+	// present. nil or ok=false = the reference's own host over https
+	// (http for loopback), anonymously or with Credentials.
+	Hosts func(host string) (HostConfig, bool)
 	// CacheTTL bounds how long an inspection by reference is reused; a
 	// tag can move underneath it, so this is short. <= 0 disables caching.
 	CacheTTL time.Duration
@@ -471,11 +479,24 @@ func chooseManifest(ds []descriptor) *descriptor {
 }
 
 func (s *session) baseURL() string {
+	return s.v2Root() + "/" + s.ref.Repository
+}
+
+// v2Root is `<scheme>://<api host>/v2` for the reference's registry: the
+// deployment's host configuration when it names one (an in-cluster
+// address or a plain-HTTP registry the nodes know under another name),
+// else https, or http for a loopback host.
+func (s *session) v2Root() string {
+	if s.c.Hosts != nil {
+		if hc, ok := s.c.Hosts(s.ref.Host); ok && hc.APIBase != "" {
+			return strings.TrimRight(hc.APIBase, "/") + "/v2"
+		}
+	}
 	scheme := "https"
 	if s.ref.Insecure {
 		scheme = "http"
 	}
-	return scheme + "://" + s.ref.APIHost + "/v2/" + s.ref.Repository
+	return scheme + "://" + s.ref.APIHost + "/v2"
 }
 
 func (s *session) getManifest(ctx context.Context, name string) (body []byte, digest, mediaType string, err error) {
@@ -572,8 +593,8 @@ func (s *session) do(ctx context.Context, rawURL string, accept []string) (*http
 	switch {
 	case s.token != "":
 		req.Header.Set("Authorization", "Bearer "+s.token)
-	case s.c.Credentials != nil:
-		if u, p, ok := s.c.Credentials(s.ref.Host); ok {
+	default:
+		if u, p, ok := s.c.basicAuthFor(s.ref.Host); ok {
 			req.SetBasicAuth(u, p)
 		}
 	}
@@ -611,10 +632,8 @@ func (s *session) fetchToken(ctx context.Context, params map[string]string) erro
 	if err != nil {
 		return &Error{What: "auth " + s.ref.Host, Msg: err.Error()}
 	}
-	if s.c.Credentials != nil {
-		if user, pass, ok := s.c.Credentials(s.ref.Host); ok {
-			req.SetBasicAuth(user, pass)
-		}
+	if user, pass, ok := s.c.basicAuthFor(s.ref.Host); ok {
+		req.SetBasicAuth(user, pass)
 	}
 	resp, err := s.c.httpClient().Do(req)
 	if err != nil {

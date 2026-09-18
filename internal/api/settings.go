@@ -211,10 +211,12 @@ func policyView(p *controller.StoredPolicy, source string) PolicyView {
 	images := imagesToWire(p.Images)
 	workloadIdentity := workloadIdentityToWire(p.WorkloadIdentity)
 	namespaces := namespacesToWire(p.Namespaces)
+	imageSources := imageSourcesToWire(p.ImageSources)
 	return PolicyView{
 		Images:           &images,
 		WorkloadIdentity: &workloadIdentity,
 		Namespaces:       &namespaces,
+		ImageSources:     &imageSources,
 		Prices:           prices,
 		Quotas:           quotas,
 		Budgets:          budgets,
@@ -667,6 +669,13 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 			return nil, err
 		}
 	}
+	var imageSources []core.ImageSource
+	if body.ImageSources != nil {
+		var err error
+		if imageSources, err = imageSourcesFromWire(*body.ImageSources); err != nil {
+			return nil, err
+		}
+	}
 	var namespaces map[string]string
 	if body.Namespaces != nil {
 		if !s.TenantNamespaces {
@@ -732,6 +741,11 @@ func (s *Server) UpdatePolicy(ctx context.Context, req UpdatePolicyRequestObject
 	// (core.ClusterSpec.NamespaceResolved).
 	if body.Namespaces != nil {
 		next.Namespaces = namespaces
+	}
+	// Image sources (#10) are pointers into registries, not approvals, so
+	// the replace has no retroactivity question at all.
+	if body.ImageSources != nil {
+		next.ImageSources = imageSources
 	}
 	// Environments (#52) follow the same section-replace rule as profiles,
 	// admission and storage: a present key replaces the whole catalog (`[]`

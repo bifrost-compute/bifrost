@@ -21,6 +21,7 @@ import (
 	"github.com/bifrost-compute/bifrost/internal/core"
 	"github.com/bifrost-compute/bifrost/internal/provision"
 	"github.com/bifrost-compute/bifrost/internal/provision/live"
+	ociregistry "github.com/bifrost-compute/bifrost/internal/registry"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
@@ -64,6 +65,7 @@ type serveOptions struct {
 	ServicesPerProject      int
 	RuntimeEnvUngoverned    bool
 	TenantNamespaces        bool
+	ImageRegistries         string
 	PackageProxy            string
 }
 
@@ -117,6 +119,8 @@ func newServeCmd() *cobra.Command {
 		"Scheme (and optional prefix) clients reach the gateway through, e.g. https://, used to build gateway_url. Empty = not reported")
 	f.IntVar(&opts.ServicesPerProject, "services-per-project", 1,
 		"Cap on concurrently deployed services per project (requirement 2); deploys beyond it answer 409")
+	f.StringVar(&opts.ImageRegistries, "image-registries", "",
+		"JSON file describing registry hosts for inspect_image and image sources (#10): per host, the address the control plane reaches its /v2 API at and the basic credentials to present (see internal/registry.LoadHostsFile). Empty = every registry anonymously")
 	f.BoolVar(&opts.TenantNamespaces, "tenant-namespaces", false,
 		"Enable per-project tenant namespaces (#21): the policy's `namespaces` map places a project's clusters, jobs and services in its own namespace; needs cluster-wide RBAC (the chart's tenancy.clusterWide)")
 	f.BoolVar(&opts.RuntimeEnvUngoverned, "allow-ungoverned-runtime-env", false,
@@ -245,6 +249,16 @@ func buildServer(ctx context.Context, opts serveOptions) (*builtServer, error) {
 			AllowedImagePrefixes: api.ParseImagePrefixes(opts.AllowedImages),
 			MaxWorkers:           opts.MaxWorkers,
 		},
+	}
+	if opts.ImageRegistries != "" {
+		hosts, err := ociregistry.LoadHostsFile(opts.ImageRegistries)
+		if err != nil {
+			return fail(fmt.Errorf("--image-registries: %w", err))
+		}
+		c := ociregistry.New(nil)
+		c.Hosts = hosts
+		cfg.Images = c
+		slog.Info("image registries configured", "file", opts.ImageRegistries)
 	}
 	var liveClient *live.Client
 	if opts.Namespace != "" {

@@ -97,3 +97,43 @@ func ImageRepository(ref string) string {
 	}
 	return ref
 }
+
+// ImageSource is a registry repository an administrator lets the console
+// browse (#10, image sources): "list the tags of this repository on this
+// registry, live, so new pushes show up as candidates for the catalog".
+// It is a pointer, never an approval — a tag becomes runnable only when
+// an administrator adds it to the image catalog (ImageEntry). The
+// control plane reaches the registry through `serve --image-registries`
+// (registry.HostConfig: in-cluster address, credentials); a source
+// naming a host that file does not describe is read anonymously over
+// https (http for loopback).
+type ImageSource struct {
+	// Name is the source's name, an RFC 1123 label.
+	Name string `json:"name"`
+	// Description is a human-readable summary; nil = none.
+	Description *string `json:"description"`
+	// Registry is the host[:port] as image references name it — what
+	// the nodes pull from (`localhost:32000`, an Artifact Keeper
+	// Service, `ghcr.io`).
+	Registry string `json:"registry"`
+	// Repository is the one repository to list; "" = every repository the
+	// registry's catalog answers with (registries that implement
+	// `/v2/_catalog`; Docker Hub does not).
+	Repository string `json:"repository"`
+	// Projects whose administrators may browse this source; empty = all.
+	Projects []string `json:"projects"`
+}
+
+// imageSourceAlias breaks the recursion MarshalJSON would otherwise cause
+// by re-entering ImageSource's own MarshalJSON.
+type imageSourceAlias ImageSource
+
+// MarshalJSON substitutes an empty slice for a nil Projects (nil is not
+// a valid Vec: `[]`, never `null`).
+func (e ImageSource) MarshalJSON() ([]byte, error) {
+	a := imageSourceAlias(e)
+	if a.Projects == nil {
+		a.Projects = []string{}
+	}
+	return json.Marshal(a)
+}

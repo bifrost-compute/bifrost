@@ -38,6 +38,9 @@ operations:
   # --- image catalog (#10): read like profiles; inspect_image answers 404 for a name the caller may not see
   list_images:       {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
   inspect_image:     {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
+  # --- image sources (#10): a read like the catalog; tags answers 404 for a source the caller may not see
+  list_image_sources:     {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
+  list_image_source_tags: {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
   # --- services (target Service: developer full, operator read)
   list_services:    {admin: allow, operator: allow, dev-a: allow, dev-b: allow}
   deploy_service:   {admin: allow, operator: deny,  dev-a: scoped, dev-b: scoped}

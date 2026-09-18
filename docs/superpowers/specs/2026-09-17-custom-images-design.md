@@ -50,6 +50,18 @@ of record and the scanner.*
   anonymous or with basic credentials; loopback registries over plain HTTP;
   5 minute cache). `ImageInspect` is the shared JSON shape of §4.1 minus the
   `security` and `bifrost` blocks.
+- **Shipped 2026-09-18: image sources.** `core.ImageSource` (policy
+  `image_sources`), `GET /api/v1/images/sources` and
+  `GET /api/v1/images/sources/{name}/tags` list a registry repository's
+  tags (or a registry's whole `/v2/_catalog`) live through
+  `internal/registry` (`ListRepositories`, `ListTags`, paginated, same
+  Bearer-challenge session as inspect). `serve --image-registries` loads a
+  per-host file (`registry.LoadHostsFile`: API address the pod reaches,
+  basic credentials or a `password_file`), consulted by inspect and the
+  listings, so `localhost:32000` references resolve through the
+  in-cluster Service and Artifact Keeper is read with a repository-scoped
+  token. The console picks a tag from a source into the catalog form
+  (bifrost-ui, same day).
 - **Not shipped in bifrost:** pull secrets on pods (D7), digest resolution
   at save (D3), Artifact Keeper scan summary and webhook (§4.2/§4.3),
   registry-host SSRF screening for inspect (the catalog is admin-only; the
