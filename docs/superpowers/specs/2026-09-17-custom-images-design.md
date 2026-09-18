@@ -91,6 +91,19 @@ of record and the scanner.*
   Bifrost's remaining piece is the webhook that turns a pushed build into a
   catalog entry (§4.2 item 5).
 
+- **Proven end to end on grace (2026-09-18).** An image built by the
+  Artifact Keeper builder (`rayproject/ray:2.56.0` + a pip package) was
+  browsed into Bifrost through an image source, added to the catalog, pulled
+  by the node from `artifacts.100-89-230-107.sslip.io` and run as a Ray job
+  through Bifrost. What that took, and what it means for the design: the
+  node's containerd trusts the cluster CA through a `certs.d/<host>/hosts.toml`
+  (a pack or node-bootstrap item, not code); the Artifact Keeper repository is
+  publicly readable because pods carry no pull secret (D7 remains the proper
+  fix); Bifrost reaches the registry API over the in-cluster HTTP address via
+  the `--image-registries` file, so the control plane needs no CA either.
+  Nodes without AVX2 need `polars-lts-cpu`-style wheels — a reason the wizard
+  should surface the target node architecture in the future.
+
 ## 1. Load-bearing facts (verified in code and on grace)
 
 ### 1.1 Bifrost today
