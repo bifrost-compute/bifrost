@@ -104,6 +104,25 @@ of record and the scanner.*
   Nodes without AVX2 need `polars-lts-cpu`-style wheels — a reason the wizard
   should surface the target node architecture in the future.
 
+- **Builder spec v2 and the release path (2026-09-18).** The Artifact
+  Keeper spec is no longer apt-shaped: `packages` is an ordered list of
+  groups, each naming its manager (`apt`, `dnf`, `microdnf`, `yum`, `apk`,
+  `pip`, `conda`), so a UBI or Alpine base installs with the tool it ships;
+  `multistage: true` builds the pip groups in a builder stage and copies only
+  the installed packages into the final image; `dockerfile` carries a whole
+  Dockerfile when `AK_IMAGE_BUILD_ALLOW_DOCKERFILE=true`, with every `FROM`
+  checked against the base allowlist. The console's wizard has a manager
+  dropdown limited to what the instance supports, suggests the system
+  manager from the base image, and offers the Dockerfile mode. The work is
+  filed for Artifact Keeper 1.10.0: artifact-keeper#4024 (issue #4034,
+  migration 221, DB-backed runner tests with a fake `buildctl`),
+  artifact-keeper-web#851 (issue #875, component tests),
+  artifact-keeper-site#107 (issue #108, `docs/advanced/image-builder`),
+  artifact-keeper-iac#341 (issue #340, `imageBuilder.*` values deploying the
+  rootless buildkitd and wiring `AK_*` into the backend). The OpenAPI spec
+  and SDKs regenerate from utoipa on release, so no manual sync is needed.
+  Bifrost is unchanged by v2: it still consumes the pushed digest.
+
 ## 1. Load-bearing facts (verified in code and on grace)
 
 ### 1.1 Bifrost today
