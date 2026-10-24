@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
       - name: Run the load rig
         # N=20000/c=32: the ADR's 20000-request run finished in under a
