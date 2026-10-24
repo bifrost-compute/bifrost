@@ -95,7 +95,7 @@ jobs:
           docker exec -d "${KIND_CLUSTER}-control-plane" crictl pull rayproject/ray:2.56.0
           docker exec -d "${KIND_CLUSTER}-control-plane" crictl pull registry.k8s.io/e2e-test-images/agnhost:2.45
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - name: Install KubeRay and Kueue
         run: |
